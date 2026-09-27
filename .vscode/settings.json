@@ -1,0 +1,14 @@
+{
+  "sqltools.connections": [
+    {
+      "name": "wardrobe",
+      "driver": "PostgreSQL",
+      "server": "localhost",
+      "port": 5432,
+      "database": "wardrobe",
+      "username": "weiyang",
+      "password": "unused",
+      "askForPassword": false
+    }
+  ]
+}

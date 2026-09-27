@@ -1,0 +1,13 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS items (
+  id uuid PRIMARY KEY,
+  image_path text,
+  original_filename text,
+  category text,
+  color text,
+  pattern text,
+  formality text,
+  warmth text,
+  clip_vec vector(512)
+);
