@@ -1,30 +1,42 @@
 """
-Outfit engine for the wardrobe app.
+Outfit engine for the wardrobe app (version 3: fully local, no API key).
+
+Same pipeline as outfit_engine.py, but the reasoning steps run on a small
+open-source text model via Ollama instead of GPT.
 
 Turns a request like "dinner date tonight, we'll walk around outside" into
 2-3 outfits built only from items already tagged by tagging_worker_2.py.
 
-  1. Parse   - GPT turns the request into tag filters + a style description
+  1. Parse    - local LLM turns the request into tag filters + a style description
   2. Retrieve - Postgres filters by tags, then CLIP ranks items by similarity
                 to the style description (a shortlist per category)
-  3. Generate - GPT picks items from the shortlist and builds outfits
+  3. Generate - local LLM picks items from the shortlist and builds outfits
   4. Validate - code checks every item exists and each outfit is complete
 
 It reuses ALLOWED and CLIP from tagging_worker_2.py so the tag lists live in
-one place, but calls GPT (OpenAI) for the parsing/generation steps.
-Put this file next to tagging_worker_2.py.
+one place. Put this file next to tagging_worker_2.py.
 
 Reads items from the view_items_2 table (see view_items_2.sql).
 
+Ollama setup:
+  1. Install Ollama from https://ollama.com
+  2. ollama pull llama3.2:3b          (or qwen2.5:3b-instruct, phi3.5, etc.)
+  3. Make sure Ollama is running (the desktop app, or `ollama serve`)
+
+A text-only instruct model is used here (not tagging_worker_2's vision model
+qwen2.5vl:3b) because this step is pure text reasoning over a wardrobe
+listing, not image understanding - a vision model is markedly worse at it.
+
 Env vars:
-  OPENAI_API_KEY   - for the LLM
-  OPENAI_MODEL     - optional, any GPT model (default below)
+  DATABASE_URL         - Postgres with the pgvector extension
+  ITEMS_TABLE          - optional, table/view to read items from (default below)
+  OLLAMA_TEXT_MODEL    - optional, local text model name (default below)
 
 Run the server (serves BOTH /items and /outfits):
-  uvicorn outfit_engine:app --reload
+  uvicorn outfit_engine_3:app --reload
 
 Or try it from the terminal:
-  python outfit_engine.py "dinner date tonight, walking around outside"
+  python outfit_engine_3.py "dinner date tonight, walking around outside"
 """
 
 import json
@@ -34,21 +46,22 @@ from html import escape as esc
 from urllib.parse import quote
 
 import numpy as np
+import ollama
 import psycopg
 import torch
-from openai import OpenAI
 from pgvector.psycopg import register_vector
 from pydantic import BaseModel
 
 from tagging_worker_2 import ALLOWED, _as_tensor, app, clip_model, clip_proc
 
-llm = OpenAI()  # reads OPENAI_API_KEY
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# Small open-source instruct model, pulled separately from tagging_worker_2's
+# vision model. Swap for "qwen2.5:3b-instruct" or "phi3.5" if you prefer.
+OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2:3b")
 
 # Which table/view to read items from.
 ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "view_items_2")
 
-# How many candidates to shortlist per category before GPT chooses.
+# How many candidates to shortlist per category before the LLM chooses.
 PER_CATEGORY = 6
 
 # Outfit slots. An outfit is (top + bottom) or a dress, plus shoes,
@@ -59,6 +72,17 @@ SLOTS = ["top", "bottom", "dress", "outerwear", "shoes"]
 # ---------------------------------------------------------------------------
 # 1. Parse the request into filters.
 # ---------------------------------------------------------------------------
+PARSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "formality": {"type": "array", "items": {"type": "string", "enum": ALLOWED["formality"]}},
+        "warmth": {"type": "array", "items": {"type": "string", "enum": ALLOWED["warmth"]}},
+        "search_text": {"type": "string"},
+    },
+    "required": ["formality", "warmth", "search_text"],
+}
+
+
 def parse_request(request: str) -> dict:
     prompt = (
         "A user in Singapore wants an outfit. Their request:\n"
@@ -74,15 +98,15 @@ def parse_request(request: str) -> dict:
         "indoors (office, mall, cinema) -> light and medium. Travel somewhere "
         "cold -> medium and heavy. Be generous: include every level that could work."
     )
-    resp = llm.chat.completions.create(
-        model=OPENAI_MODEL,
-        max_tokens=200,
-        response_format={"type": "json_object"},
+    resp = ollama.chat(
+        model=OLLAMA_TEXT_MODEL,
         messages=[{"role": "user", "content": prompt}],
+        format=PARSE_SCHEMA,
+        options={"temperature": 0},
     )
-    raw = json.loads(resp.choices[0].message.content)
+    raw = json.loads(resp["message"]["content"])
 
-    # Keep only allowed values; if GPT returns nothing usable, don't filter at all.
+    # Keep only allowed values; if the model returns nothing usable, don't filter at all.
     constraints = {}
     for attribute in ("formality", "warmth"):
         values = [str(v).lower().strip() for v in raw.get(attribute, [])]
@@ -131,7 +155,7 @@ def fetch_candidates(constraints: dict) -> list[dict]:
             fits = True
 
             # Small wardrobes often have nothing that passes the filters in some
-            # category. Fall back to the closest items, flagged so GPT knows.
+            # category. Fall back to the closest items, flagged so the LLM knows.
             if not rows:
                 rows = conn.execute(
                     psycopg.sql.SQL(
@@ -153,13 +177,37 @@ def fetch_candidates(constraints: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 3. Generate outfits with GPT.
+# 3. Generate outfits with the local LLM.
 # ---------------------------------------------------------------------------
 def describe(short_id: str, item: dict) -> str:
     tags = " | ".join(str(item.get(k) or "?") for k in
                       ("category", "color", "pattern", "formality", "warmth"))
     note = "" if item["fits_filters"] else "  (doesn't match the filters; use only if needed)"
     return f"{short_id}: {tags}  [{item.get('original_filename') or ''}]{note}"
+
+
+OUTFITS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "outfits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "top": {"type": ["string", "null"]},
+                    "bottom": {"type": ["string", "null"]},
+                    "dress": {"type": ["string", "null"]},
+                    "outerwear": {"type": ["string", "null"]},
+                    "shoes": {"type": ["string", "null"]},
+                    "title": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["title", "reason"],
+            },
+        },
+    },
+    "required": ["outfits"],
+}
 
 
 def generate_outfits(request: str, constraints: dict, items_by_short_id: dict,
@@ -187,17 +235,17 @@ def generate_outfits(request: str, constraints: dict, items_by_short_id: dict,
         '"title": "short catchy outfit name", '
         '"reason": "one or two friendly sentences on why it works"}]}'
     )
-    resp = llm.chat.completions.create(
-        model=OPENAI_MODEL,
-        max_tokens=800,
-        response_format={"type": "json_object"},
+    resp = ollama.chat(
+        model=OLLAMA_TEXT_MODEL,
         messages=[{"role": "user", "content": prompt}],
+        format=OUTFITS_SCHEMA,
+        options={"temperature": 0.7},
     )
-    return json.loads(resp.choices[0].message.content).get("outfits", [])
+    return json.loads(resp["message"]["content"]).get("outfits", [])
 
 
 # ---------------------------------------------------------------------------
-# 4. Validate: GPT can invent ids or put items in the wrong slot.
+# 4. Validate: the LLM can invent ids or put items in the wrong slot.
 # ---------------------------------------------------------------------------
 def validate_outfits(raw_outfits: list, items_by_short_id: dict) -> list[dict]:
     has_shoes = any(i["category"] == "shoes" for i in items_by_short_id.values())
@@ -247,7 +295,7 @@ def recommend(request: str, n: int = 3) -> dict:
     candidates = fetch_candidates(constraints)
     print(f"[OUTFIT] {request!r} -> {constraints}, {len(candidates)} candidates")
 
-    # GPT is more reliable with short ids like A1 than with long UUIDs.
+    # The LLM is more reliable with short ids like A1 than with long UUIDs.
     items_by_short_id = {f"A{i + 1}": item for i, item in enumerate(candidates)}
 
     categories = {i["category"] for i in candidates}
@@ -257,7 +305,7 @@ def recommend(request: str, n: int = 3) -> dict:
                            "bottom, or a dress."}
 
     outfits = []
-    for _attempt in range(2):  # one retry if GPT's first answer is unusable
+    for _attempt in range(2):  # one retry if the first answer is unusable
         raw = generate_outfits(request, constraints, items_by_short_id, n)
         outfits = validate_outfits(raw, items_by_short_id)[:n]
         if outfits:
@@ -288,10 +336,10 @@ def format_text(request: str, result: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# HTML preview: outfits.html shows each outfit as a card with its photos side by
-# side, so you can judge by eye whether the pieces look good together.
+# HTML preview: outfits_3.html shows each outfit as a card with its photos side
+# by side, so you can judge by eye whether the pieces look good together.
 # ---------------------------------------------------------------------------
-HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outfits.html")
+HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outfits_3.html")
 
 
 def render_html(request: str, result: dict) -> str:
@@ -327,7 +375,9 @@ def write_preview(request: str, result: dict, open_browser: bool = False) -> str
 
 
 # ---------------------------------------------------------------------------
-# Endpoint, added to the same FastAPI app as /items.
+# Endpoint, added to the same FastAPI app as /items. Run only one of
+# outfit_engine.py / outfit_engine_3.py's server at a time - both register
+# POST /outfits on the shared app.
 # ---------------------------------------------------------------------------
 class OutfitRequest(BaseModel):
     request: str
@@ -337,7 +387,7 @@ class OutfitRequest(BaseModel):
 @app.post("/outfits")
 def outfits_endpoint(body: OutfitRequest):
     result = recommend(body.request, max(1, min(body.n, 5)))
-    write_preview(body.request, result)  # refreshes outfits.html, doesn't open it
+    write_preview(body.request, result)  # refreshes outfits_3.html, doesn't open it
     return result
 
 

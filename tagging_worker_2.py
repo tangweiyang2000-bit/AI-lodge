@@ -1,24 +1,35 @@
 """
-Tagging worker for a wardrobe app.
+Tagging worker for a wardrobe app (version 2: fully local, no APIs).
 
 Runs once per uploaded clothing photo:
   1. Tags it (category, color, pattern, formality, warmth)
   2. Computes its CLIP image vector (used later by the outfit engine for search)
   3. Saves both to the database
 
+Everything runs on your own machine. No API keys, no per-image cost.
+
+Tagging modes (set TAGGER below):
+  "ollama" - small open-source vision model running locally via Ollama (default)
+  "clip"   - CLIP zero-shot, fastest but weakest on formality/warmth
+
 Install:
-  pip install fastapi uvicorn python-multipart openai torch transformers pillow psycopg[binary] pgvector
+  pip install fastapi uvicorn python-multipart torch transformers pillow \
+              psycopg[binary] pgvector python-dotenv ollama
+
+Ollama setup (for TAGGER = "ollama"):
+  1. Install Ollama from https://ollama.com
+  2. ollama pull qwen2.5vl:3b          (or gemma3:4b, moondream, etc.)
+  3. Make sure Ollama is running (the desktop app, or `ollama serve`)
 
 Env vars:
-  OPENAI_API_KEY      - for the LLM tagging option
-  OPENAI_MODEL        - optional, any vision-capable GPT model (default below)
   DATABASE_URL        - Postgres with the pgvector extension
+  TAGGER              - optional, "ollama" (default) or "clip"
+  OLLAMA_MODEL        - optional, local vision model name (default below)
 
 Run:
-  uvicorn tagging_worker:app --reload
+  uvicorn tagging_worker_2:app --reload
 """
 
-import base64
 import io
 import json
 import os
@@ -29,15 +40,21 @@ import psycopg
 import torch
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, UploadFile
-from openai import OpenAI
 from pgvector.psycopg import register_vector
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 
 load_dotenv()  # uvicorn doesn't read .env on its own
 
+# Which tagger to use: "ollama" or "clip"
+TAGGER = os.environ.get("TAGGER", "ollama")
+
+# Which table to save to (same schema as items). Lets a one-off batch run
+# write to a separate table without touching the live upload endpoint.
+ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "items")
+
 # ---------------------------------------------------------------------------
-# 1. The allowed tags. Both tagging options can only pick from these lists.
+# 1. The allowed tags. Every tagging option can only pick from these lists.
 # ---------------------------------------------------------------------------
 ALLOWED = {
     "category":  ["top", "bottom", "dress", "outerwear", "shoes"],
@@ -52,6 +69,24 @@ ALLOWED = {
     "warmth":    ["light", "medium", "heavy"],
 }
 
+# Instructions for the local vision model (Ollama).
+PROMPT = (
+    "Classify this clothing item. Reply with ONLY a JSON object with keys "
+    "category, color, pattern, formality, warmth. Each value must be one of:\n"
+    + json.dumps(ALLOWED, indent=2)
+    + "\n\nWarmth means how warm the item is to wear: light = fine outdoors in "
+    "tropical heat, medium = a layer for air-conditioned rooms, "
+    "heavy = only for cold climates."
+)
+
+# JSON schema built from ALLOWED, so the local model can only answer with
+# allowed values.
+TAG_SCHEMA = {
+    "type": "object",
+    "properties": {k: {"type": "string", "enum": v} for k, v in ALLOWED.items()},
+    "required": list(ALLOWED),
+}
+
 # CLIP matches sentences to images, so some tags need a clearer sentence than
 # the default "a photo of a {option} {attribute} clothing item".
 CLIP_PHRASES = {
@@ -64,6 +99,9 @@ CLIP_PHRASES = {
 
 # ---------------------------------------------------------------------------
 # 2. Load CLIP once when the server starts (not on every upload).
+#    It's needed in every mode, because the outfit engine uses its vectors.
+#    Tip: "patrickjohncyh/fashion-clip" is a fashion-tuned drop-in (also 512
+#    dims). If you switch, re-embed items already saved with the old model.
 # ---------------------------------------------------------------------------
 CLIP_NAME = "openai/clip-vit-base-patch32"
 clip_model = CLIPModel.from_pretrained(CLIP_NAME).eval()
@@ -85,7 +123,25 @@ def clip_image_vector(img: Image.Image) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# 3a. Tagging option A: CLIP zero-shot (free, runs on your server).
+# 3a. Tagging option A: local vision model via Ollama (free, open-source).
+# ---------------------------------------------------------------------------
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5vl:3b")
+
+
+def tag_with_ollama(image_bytes: bytes) -> dict:
+    import ollama  # imported here so the other modes don't need it
+
+    resp = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=[{"role": "user", "content": PROMPT, "images": [image_bytes]}],
+        format=TAG_SCHEMA,              # output must match the allowed values
+        options={"temperature": 0},     # same photo -> same tags
+    )
+    return json.loads(resp["message"]["content"])
+
+
+# ---------------------------------------------------------------------------
+# 3b. Tagging option B: CLIP zero-shot (free, fastest, runs on your server).
 # ---------------------------------------------------------------------------
 def tag_with_clip(img: Image.Image) -> dict:
     tags = {}
@@ -108,39 +164,13 @@ def tag_with_clip(img: Image.Image) -> dict:
     return tags
 
 
-# ---------------------------------------------------------------------------
-# 3b. Tagging option B: multimodal LLM (better on formality, costs per call).
-# ---------------------------------------------------------------------------
-llm = OpenAI()  # reads OPENAI_API_KEY
-# Any GPT model that accepts images works; check OpenAI's model list for current names.
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-
-
-def tag_with_llm(image_bytes: bytes, media_type: str) -> dict:
-    prompt = (
-        "Classify this clothing item. Reply with ONLY a JSON object with keys "
-        "category, color, pattern, formality, warmth. Each value must be one of:\n"
-        + json.dumps(ALLOWED, indent=2)
-        + "\n\nWarmth means how warm the item is to wear: light = fine outdoors in "
-        "tropical heat, medium = a layer for air-conditioned rooms, "
-        "heavy = only for cold climates."
-    )
-    # OpenAI takes images as a data URL: "data:image/jpeg;base64,...."
-    data_url = f"data:{media_type};base64,{base64.b64encode(image_bytes).decode()}"
-
-    resp = llm.chat.completions.create(
-        model=OPENAI_MODEL,
-        max_tokens=200,
-        response_format={"type": "json_object"},  # forces valid JSON back
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }],
-    )
-    return json.loads(resp.choices[0].message.content)
+def tag_image(img: Image.Image, image_bytes: bytes) -> dict:
+    """Send the photo to whichever local tagger TAGGER selects."""
+    if TAGGER == "ollama":
+        return tag_with_ollama(image_bytes)
+    if TAGGER == "clip":
+        return tag_with_clip(img)
+    raise ValueError(f"Unknown TAGGER {TAGGER!r}: use 'ollama' or 'clip'")
 
 
 # ---------------------------------------------------------------------------
@@ -165,9 +195,11 @@ def save_item(item_id, image_path, original_filename, tags, vector):
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         register_vector(conn)
         conn.execute(
-            """INSERT INTO items (id, image_path, original_filename, category,
+            psycopg.sql.SQL(
+                """INSERT INTO {} (id, image_path, original_filename, category,
                                   color, pattern, formality, warmth, clip_vec)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+            ).format(psycopg.sql.Identifier(ITEMS_TABLE)),
             (item_id, image_path, original_filename, tags["category"], tags["color"],
              tags["pattern"], tags["formality"], tags["warmth"], vector),
         )
@@ -178,19 +210,16 @@ def save_item(item_id, image_path, original_filename, tags, vector):
 #    Progress is only printed to the terminal (nothing extra is stored in the database):
 #      TAGGING -> TAGGED -> UPLOADED, or TAGGING_FAILED / UPLOAD_FAILED
 # ---------------------------------------------------------------------------
-USE_LLM = True  # flip to False to use free CLIP tagging instead
-
 def tagging_worker(item_id: str, image_path: str,
                    original_filename: str, media_type: str):
     # Background tasks fail silently from the client's view, so log the traceback.
-    print(f"[TAGGING] {item_id} ({original_filename})")
+    print(f"[TAGGING] {item_id} ({original_filename}) with {TAGGER}")
     try:
         with open(image_path, "rb") as f:
             image_bytes = f.read()
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        raw_tags = tag_with_llm(image_bytes, media_type) if USE_LLM else tag_with_clip(img)
-        tags = validate(raw_tags)
+        tags = validate(tag_image(img, image_bytes))
         vector = clip_image_vector(img)  # always computed: the outfit engine needs it
     except Exception:
         traceback.print_exc()
@@ -228,7 +257,7 @@ async def upload_item(file: UploadFile, background: BackgroundTasks):
 
 # ---------------------------------------------------------------------------
 # 8. Tag an image that is already on disk, without copying it to uploads/:
-#      python tagging_worker.py gpt_generate/gpt_black_baggy_jeans_20260927_043218.png
+#      python tagging_worker_2.py gpt_generate/gpt_black_baggy_jeans_20260927_043218.png
 #    The path you pass is stored in the database as-is.
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
