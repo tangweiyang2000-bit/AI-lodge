@@ -30,6 +30,11 @@ from datetime import datetime
 from PIL import Image, ImageEnhance
 from rembg import new_session, remove
 
+# These are always our own photos, never untrusted uploads, and the 4x
+# super-res pass legitimately produces large images, so disable PIL's
+# decompression-bomb safety cap.
+Image.MAX_IMAGE_PIXELS = None
+
 # ---- Settings ---------------------------------------------------------------
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..")
 TEST_IMAGES_DIR = os.path.join(PROJECT_ROOT, "test_images")
@@ -37,7 +42,7 @@ TEST_IMAGES_DIR = os.path.join(PROJECT_ROOT, "test_images")
 # Paste a space- or newline-separated list of paths (relative to the project
 # root, e.g. "test_images/foo.jpg") straight in here.
 IMAGE_LIST_RAW = """
-test_images/air_force_1.jpg test_images/beige_shorts.jpg test_images/black_baggy_jeans.jpg test_images/blue_denim.jpg test_images/blue_hoodie.jpg test_images/brown_clogs.jpg test_images/floral_shirt.jpg test_images/mclaren.jpg test_images/white_button_down.jpg test_images/white_mercedes_shirt.jpg test_images/white_t_shirt.jpg
+
 """
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
@@ -45,9 +50,17 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 def parse_image_list(raw: str) -> list[str]:
     """Split a pasted, space/newline-separated path list, tolerating spaces
-    inside filenames by merging tokens until one ends in an image extension."""
+    inside filenames by merging tokens until one ends in an image extension.
+
+    Splits on plain ASCII space/tab/newline only (not str.split()'s default,
+    which treats any Unicode whitespace as a separator) because macOS
+    timestamp-suffixed filenames (e.g. "photo 5.02.43 AM.jpg") contain a
+    narrow no-break space before AM/PM that must stay part of the filename.
+    """
     paths, buffer = [], []
-    for token in raw.split():
+    for token in re.split(r"[ \t\r\n]+", raw.strip()):
+        if not token:
+            continue
         buffer.append(token)
         if token.lower().endswith(IMAGE_EXTENSIONS):
             paths.append(os.path.join(PROJECT_ROOT, " ".join(buffer)))
@@ -62,7 +75,7 @@ IMAGE_PATHS = parse_image_list(IMAGE_LIST_RAW)
 #   "birefnet-general-lite" good compromise
 #   "isnet-general-use"     fast, decent (~170 MB)
 #   "u2net"                 classic, fastest, rougher edges
-MODEL_NAME = "birefnet-general"
+MODEL_NAME = "birefnet-general-lite"
 
 CANVAS_SIZE = (1024, 1536)  # same as your GPT output
 PADDING = 0.08              # fraction of canvas kept empty around the item
@@ -73,11 +86,18 @@ REALESRGAN_DIR = os.path.join(os.path.dirname(__file__), "bin")
 REALESRGAN_BIN = os.path.join(REALESRGAN_DIR, "realesrgan-ncnn-vulkan")
 REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip"
 
-# Filenames to skip sharpening for: the GAN model hallucinates fake detail
-# instead of reconstructing tiny printed text/logos (not enough real pixels
-# to work from), so these come out clearer with a plain resize.
-SUPER_RES_SKIP = {"white_mercedes_shirt.jpg"}
+# Only super-res photos that are smaller than the box the garment needs to
+# fill on the canvas; upscaling something already sharp is where the GAN
+# starts hallucinating fake detail instead of helping.
+_SUPER_RES_TARGET_W = int(CANVAS_SIZE[0] * (1 - 2 * PADDING))
+_SUPER_RES_TARGET_H = int(CANVAS_SIZE[1] * (1 - 2 * PADDING))
 # -----------------------------------------------------------------------------
+
+
+def needs_super_res(img: Image.Image) -> bool:
+    """True if the source photo is smaller (by pixel count) than the box the
+    garment must fill on the canvas."""
+    return (img.width * img.height) < (_SUPER_RES_TARGET_W * _SUPER_RES_TARGET_H)
 
 
 def cut_out(img: Image.Image, session) -> Image.Image:
@@ -158,7 +178,7 @@ def process_one(image_path: str, session) -> None:
 
     result = cut_out(img, session)
     result = crop_to_content(result)
-    if ENABLE_SUPER_RES and os.path.basename(image_path) not in SUPER_RES_SKIP:
+    if ENABLE_SUPER_RES and needs_super_res(img):
         result = super_resolve(result)
     result = place_on_canvas(result, CANVAS_SIZE, PADDING)
     if ENHANCE:
