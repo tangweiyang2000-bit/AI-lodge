@@ -8,6 +8,5 @@ CREATE TABLE IF NOT EXISTS items (
   color text,
   pattern text,
   formality text,
-  warmth text,
   clip_vec vector(512)
 );

@@ -3,3 +3,6 @@
 uploads/
 __pycache__/
 local_generate/bin/
+birefnet_generate/bin/
+macos_generate/bin/
+.DS_Store

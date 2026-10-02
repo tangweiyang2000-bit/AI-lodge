@@ -2,7 +2,7 @@
 Tagging worker for a wardrobe app (version 2: fully local, no APIs).
 
 Runs once per uploaded clothing photo:
-  1. Tags it (category, color, pattern, formality, warmth)
+  1. Tags it (category, color, pattern, formality)
   2. Computes its CLIP image vector (used later by the outfit engine for search)
   3. Saves both to the database
 
@@ -10,7 +10,7 @@ Everything runs on your own machine. No API keys, no per-image cost.
 
 Tagging modes (set TAGGER below):
   "ollama" - small open-source vision model running locally via Ollama (default)
-  "clip"   - CLIP zero-shot, fastest but weakest on formality/warmth
+  "clip"   - CLIP zero-shot, fastest but weakest on formality
 
 Install:
   pip install fastapi uvicorn python-multipart torch transformers pillow \
@@ -59,24 +59,16 @@ ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "items")
 ALLOWED = {
     "category":  ["top", "bottom", "dress", "outerwear", "shoes"],
     "color":     ["black", "white", "grey", "navy", "blue", "beige", "brown",
-                  "green", "red", "pink", "yellow", "purple", "multicolor"],
+                  "green", "red", "orange", "pink", "yellow", "purple", "multicolor"],
     "pattern":   ["solid", "striped", "checked", "floral", "graphic", "other"],
     "formality": ["casual", "smart casual", "business", "formal"],
-    # How warm the piece is. Replaces season, which doesn't fit Singapore:
-    #   light  = fine outdoors in the heat (linen, thin cotton, shorts, sandals)
-    #   medium = a layer for air-conditioned places (cardigan, overshirt, jeans)
-    #   heavy  = only for travel somewhere cold (wool coat, puffer, thick knit)
-    "warmth":    ["light", "medium", "heavy"],
 }
 
 # Instructions for the local vision model (Ollama).
 PROMPT = (
     "Classify this clothing item. Reply with ONLY a JSON object with keys "
-    "category, color, pattern, formality, warmth. Each value must be one of:\n"
+    "category, color, pattern, formality. Each value must be one of:\n"
     + json.dumps(ALLOWED, indent=2)
-    + "\n\nWarmth means how warm the item is to wear: light = fine outdoors in "
-    "tropical heat, medium = a layer for air-conditioned rooms, "
-    "heavy = only for cold climates."
 )
 
 # JSON schema built from ALLOWED, so the local model can only answer with
@@ -89,13 +81,7 @@ TAG_SCHEMA = {
 
 # CLIP matches sentences to images, so some tags need a clearer sentence than
 # the default "a photo of a {option} {attribute} clothing item".
-CLIP_PHRASES = {
-    "warmth": {
-        "light":  "a photo of lightweight, thin, breathable clothing for hot weather",
-        "medium": "a photo of medium-weight clothing, like a cardigan or light jacket",
-        "heavy":  "a photo of heavy, thick, warm clothing for cold winter weather",
-    },
-}
+CLIP_PHRASES = {}
 
 # ---------------------------------------------------------------------------
 # 2. Load CLIP once when the server starts (not on every upload).
@@ -189,7 +175,7 @@ def validate(tags: dict) -> dict:
 #    Table:  CREATE EXTENSION vector;
 #            CREATE TABLE items (id uuid PRIMARY KEY, image_path text,
 #              original_filename text, category text, color text, pattern text, formality text,
-#              warmth text, clip_vec vector(512));
+#              clip_vec vector(512));
 # ---------------------------------------------------------------------------
 def save_item(item_id, image_path, original_filename, tags, vector):
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
@@ -197,11 +183,11 @@ def save_item(item_id, image_path, original_filename, tags, vector):
         conn.execute(
             psycopg.sql.SQL(
                 """INSERT INTO {} (id, image_path, original_filename, category,
-                                  color, pattern, formality, warmth, clip_vec)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+                                  color, pattern, formality, clip_vec)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
             ).format(psycopg.sql.Identifier(ITEMS_TABLE)),
             (item_id, image_path, original_filename, tags["category"], tags["color"],
-             tags["pattern"], tags["formality"], tags["warmth"], vector),
+             tags["pattern"], tags["formality"], vector),
         )
 
 

@@ -66,13 +66,9 @@ def parse_request(request: str) -> dict:
         "Reply with ONLY a JSON object with these keys:\n"
         '- "formality": list of acceptable values from '
         f"{ALLOWED['formality']}\n"
-        '- "warmth": list of acceptable values from '
-        f"{ALLOWED['warmth']}\n"
         '- "search_text": one short English sentence describing the ideal outfit\'s '
         'look, e.g. "a relaxed smart-casual outfit for a warm evening"\n\n'
-        "Warmth guide: outdoors in Singapore -> light only. Air-conditioned "
-        "indoors (office, mall, cinema) -> light and medium. Travel somewhere "
-        "cold -> medium and heavy. Be generous: include every level that could work."
+        "Be generous: include every formality level that could work."
     )
     resp = llm.chat.completions.create(
         model=OPENAI_MODEL,
@@ -84,7 +80,7 @@ def parse_request(request: str) -> dict:
 
     # Keep only allowed values; if GPT returns nothing usable, don't filter at all.
     constraints = {}
-    for attribute in ("formality", "warmth"):
+    for attribute in ("formality",):
         values = [str(v).lower().strip() for v in raw.get(attribute, [])]
         values = [v for v in values if v in ALLOWED[attribute]]
         constraints[attribute] = values or list(ALLOWED[attribute])
@@ -104,7 +100,7 @@ def clip_text_vector(text: str) -> np.ndarray:
     return vec[0].numpy().astype(np.float32)
 
 
-ITEM_COLUMNS = "id, image_path, original_filename, category, color, pattern, formality, warmth"
+ITEM_COLUMNS = "id, image_path, original_filename, category, color, pattern, formality"
 
 
 def fetch_candidates(constraints: dict) -> list[dict]:
@@ -121,11 +117,10 @@ def fetch_candidates(constraints: dict) -> list[dict]:
                     f"""SELECT {ITEM_COLUMNS} FROM {{}}
                         WHERE category = %s
                           AND (formality IS NULL OR formality = ANY(%s))
-                          AND (warmth    IS NULL OR warmth    = ANY(%s))
                         ORDER BY clip_vec <=> %s::vector
                         LIMIT %s"""
                 ).format(table),
-                (category, constraints["formality"], constraints["warmth"],
+                (category, constraints["formality"],
                  query_vec, PER_CATEGORY),
             ).fetchall()
             fits = True
@@ -157,7 +152,7 @@ def fetch_candidates(constraints: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 def describe(short_id: str, item: dict) -> str:
     tags = " | ".join(str(item.get(k) or "?") for k in
-                      ("category", "color", "pattern", "formality", "warmth"))
+                      ("category", "color", "pattern", "formality"))
     note = "" if item["fits_filters"] else "  (doesn't match the filters; use only if needed)"
     return f"{short_id}: {tags}  [{item.get('original_filename') or ''}]{note}"
 
@@ -171,9 +166,8 @@ def generate_outfits(request: str, constraints: dict, items_by_short_id: dict,
         "You are a personal stylist for someone in Singapore (hot and humid "
         "outdoors, cold air-conditioning indoors).\n\n"
         f'Request: "{request}"\n'
-        f"Target formality: {constraints['formality']}\n"
-        f"Target warmth: {constraints['warmth']}\n\n"
-        "Wardrobe items (id: category | color | pattern | formality | warmth):\n"
+        f"Target formality: {constraints['formality']}\n\n"
+        "Wardrobe items (id: category | color | pattern | formality):\n"
         f"{listing}\n\n"
         f"Build up to {n} different outfits using ONLY the ids above. Rules:\n"
         "- Each outfit is either a top + bottom, or a dress.\n"
@@ -275,7 +269,7 @@ def recommend(request: str, n: int = 3) -> dict:
 def format_text(request: str, result: dict) -> str:
     c = result["constraints"]
     lines = [f"Request: {request}",
-             f"Looking for: {' / '.join(c['formality'])} · {' / '.join(c['warmth'])}", ""]
+             f"Looking for: {' / '.join(c['formality'])}", ""]
     for n, outfit in enumerate(result["outfits"], 1):
         lines.append(f"Outfit {n}: {outfit.get('title') or ''}".rstrip(": "))
         for slot, item in outfit["items"].items():
