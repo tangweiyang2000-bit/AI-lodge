@@ -2,7 +2,7 @@
 Tagging worker for a wardrobe app (version 2: fully local, no APIs).
 
 Runs once per uploaded clothing photo:
-  1. Tags it (category, color, pattern, formality)
+  1. Tags it (category, subcategory, color, pattern, formality)
   2. Computes its CLIP image vector (used later by the outfit engine for search)
   3. Saves both to the database
 
@@ -57,17 +57,21 @@ ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "items")
 # 1. The allowed tags. Every tagging option can only pick from these lists.
 # ---------------------------------------------------------------------------
 ALLOWED = {
-    "category":  ["top", "bottom", "dress", "outerwear", "shoes"],
-    "color":     ["black", "white", "grey", "navy", "blue", "beige", "brown",
-                  "green", "red", "orange", "pink", "yellow", "purple", "multicolor"],
-    "pattern":   ["solid", "striped", "checked", "floral", "graphic", "other"],
-    "formality": ["casual", "smart casual", "business", "formal"],
+    "category":    ["top", "bottom", "dress", "outerwear", "footwear"],
+    "subcategory": ["t-shirts", "polos", "shirts", "hoodies, sweatshirts & jackets",
+                     "shorts", "jeans", "sweatpants",
+                     "blazers & suits", "coats", "cardigans & jumpers",
+                     "shoes"],
+    "color":       ["black", "white", "grey", "navy", "blue", "beige", "brown",
+                     "green", "red", "orange", "pink", "yellow", "purple", "multicolor"],
+    "pattern":     ["solid", "striped", "checked", "floral", "graphic", "other"],
+    "formality":   ["casual", "smart casual", "business", "formal"],
 }
 
 # Instructions for the local vision model (Ollama).
 PROMPT = (
     "Classify this clothing item. Reply with ONLY a JSON object with keys "
-    "category, color, pattern, formality. Each value must be one of:\n"
+    "category, subcategory, color, pattern, formality. Each value must be one of:\n"
     + json.dumps(ALLOWED, indent=2)
 )
 
@@ -174,8 +178,8 @@ def validate(tags: dict) -> dict:
 # 5. Save tags + vector.
 #    Table:  CREATE EXTENSION vector;
 #            CREATE TABLE items (id uuid PRIMARY KEY, image_path text,
-#              original_filename text, category text, color text, pattern text, formality text,
-#              clip_vec vector(512));
+#              original_filename text, category text, subcategory text, color text,
+#              pattern text, formality text, clip_vec vector(512));
 # ---------------------------------------------------------------------------
 def save_item(item_id, image_path, original_filename, tags, vector):
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
@@ -183,11 +187,11 @@ def save_item(item_id, image_path, original_filename, tags, vector):
         conn.execute(
             psycopg.sql.SQL(
                 """INSERT INTO {} (id, image_path, original_filename, category,
-                                  color, pattern, formality, clip_vec)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
+                                  subcategory, color, pattern, formality, clip_vec)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
             ).format(psycopg.sql.Identifier(ITEMS_TABLE)),
-            (item_id, image_path, original_filename, tags["category"], tags["color"],
-             tags["pattern"], tags["formality"], vector),
+            (item_id, image_path, original_filename, tags["category"], tags["subcategory"],
+             tags["color"], tags["pattern"], tags["formality"], vector),
         )
 
 
@@ -206,6 +210,8 @@ def tagging_worker(item_id: str, image_path: str,
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
         tags = validate(tag_image(img, image_bytes))
+        if tags["category"] == "footwear":  # only subcategory that applies to footwear
+            tags["subcategory"] = "shoes"
         vector = clip_image_vector(img)  # always computed: the outfit engine needs it
     except Exception:
         traceback.print_exc()

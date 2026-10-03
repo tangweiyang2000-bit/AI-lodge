@@ -5,8 +5,14 @@ CREATE TABLE IF NOT EXISTS items (
   image_path text,
   original_filename text,
   category text,
+  subcategory text,
   color text,
   pattern text,
   formality text,
   clip_vec vector(512)
 );
+
+-- view_items_2 is the read view outfit_engine_3.py queries by default (ITEMS_TABLE).
+-- It must stay a VIEW, not a table: tagging_worker_2.py only ever writes to `items`,
+-- so a separate table here would silently go stale.
+CREATE OR REPLACE VIEW view_items_2 AS SELECT * FROM items;
