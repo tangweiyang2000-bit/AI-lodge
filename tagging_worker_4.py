@@ -293,9 +293,9 @@ def color_from_shares(raw, pattern=None) -> tuple[str | None, list[str] | None]:
 #    Table:  CREATE EXTENSION vector;
 #            CREATE TABLE items (id uuid PRIMARY KEY, image_path text,
 #              original_filename text, category text, subcategory text, color text,
-#              colors text[], pattern text, formality text, sleeve text,
+#              colors text, pattern text, formality text, sleeve text,
 #              clip_vec vector(512));
-#    Existing table:  ALTER TABLE items ADD COLUMN colors text[];
+#    Existing table:  ALTER TABLE items ADD COLUMN colors text;
 #                     ALTER TABLE items ADD COLUMN sleeve text;
 # ---------------------------------------------------------------------------
 def save_item(item_id, image_path, original_filename, tags, vector):
@@ -308,7 +308,8 @@ def save_item(item_id, image_path, original_filename, tags, vector):
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
             ).format(psycopg.sql.Identifier(ITEMS_TABLE)),
             (item_id, image_path, original_filename, tags["category"], tags["subcategory"],
-             tags["color"], tags["colors"], tags["pattern"], tags["formality"], tags["sleeve"], vector),
+             tags["color"], ", ".join(tags["colors"]) if tags["colors"] else None,
+             tags["pattern"], tags["formality"], tags["sleeve"], vector),
         )
 
 

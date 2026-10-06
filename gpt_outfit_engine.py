@@ -185,7 +185,7 @@ def fetch_candidates(constraints: dict) -> list[dict]:
 def describe(short_id: str, item: dict) -> str:
     color = item.get("color") or "?"
     if color == "multicolor" and item.get("colors"):
-        color = f"multicolor ({', '.join(item['colors'])})"
+        color = f"multicolor ({item['colors']})"
     slots = "/".join(s for s in SLOTS if s in eligible_slots(item))
     tags = " | ".join([slots, str(item.get("subcategory") or "?"),
                        f"{item.get('sleeve') or '?'} sleeve", color,
