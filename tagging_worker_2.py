@@ -60,10 +60,11 @@ ALLOWED = {
     "category":    ["top", "bottom", "dress", "outerwear", "footwear"],
     "subcategory": ["t-shirts", "polos", "shirts", "hoodies, sweatshirts & jackets",
                      "shorts", "jeans", "sweatpants",
-                     "blazers & suits", "coats", "cardigans & jumpers",
+                     "blazers & suits", "coats",
                      "shoes"],
-    "color":       ["black", "white", "grey", "navy", "blue", "beige", "brown",
-                     "green", "red", "orange", "pink", "yellow", "purple", "multicolor"],
+    "color":       ["black", "white", "grey", "blue", "beige", "brown",
+                     "green", "red", "orange", "pink", "yellow", "purple", "maroon",
+                     "multicolor"],
     "pattern":     ["solid", "striped", "checked", "floral", "graphic", "other"],
     "formality":   ["casual", "smart casual", "business", "formal"],
 }
@@ -90,10 +91,14 @@ CLIP_PHRASES = {}
 # ---------------------------------------------------------------------------
 # 2. Load CLIP once when the server starts (not on every upload).
 #    It's needed in every mode, because the outfit engine uses its vectors.
-#    Tip: "patrickjohncyh/fashion-clip" is a fashion-tuned drop-in (also 512
-#    dims). If you switch, re-embed items already saved with the old model.
+#    patrickjohncyh/fashion-clip (fashion-tuned, also 512 dims) in place of
+#    openai/clip-vit-base-patch32 - must match tagging_worker_3.py's model,
+#    since both outfit engines embed their search query text via this file's
+#    clip_model/clip_proc and compare it against vectors tagging_worker_3.py
+#    stored. Different models = different embedding spaces = broken search,
+#    even though both happen to be 512-dim.
 # ---------------------------------------------------------------------------
-CLIP_NAME = "openai/clip-vit-base-patch32"
+CLIP_NAME = "patrickjohncyh/fashion-clip"
 clip_model = CLIPModel.from_pretrained(CLIP_NAME).eval()
 clip_proc = CLIPProcessor.from_pretrained(CLIP_NAME)
 

@@ -25,7 +25,6 @@ import subprocess
 import tempfile
 import urllib.request
 import zipfile
-from datetime import datetime
 
 from PIL import Image, ImageEnhance
 from rembg import new_session, remove
@@ -185,11 +184,12 @@ def process_one(image_path: str, session) -> None:
         result = light_touch_up(result)
 
     stem = os.path.splitext(os.path.basename(image_path))[0]
-    stem = re.sub(r"_\d{10}_.*$", "", stem)
     output_name = os.path.join(
         os.path.dirname(__file__),
-        f"birefnet_{stem}_{datetime.now():%Y%m%d_%H%M%S}.png",
+        f"birefnet_{stem}.png",
     )
+    if os.path.exists(output_name):
+        print(f"Warning: overwriting existing {output_name}")
     result.save(output_name)
     print(f"Success! Saved {output_name}")
 
