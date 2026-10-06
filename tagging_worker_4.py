@@ -9,14 +9,9 @@ Runs once per uploaded clothing photo:
 What's new in version 4:
   - Tags come from OpenAI (cloud API) instead of CLIP zero-shot / Ollama.
     The model's answer is locked to the allowed values with a JSON schema.
-  - CLIP is only used for the search vector, so CLIP_PHRASES and the
-    confidence thresholds are gone.
+  - CLIP is only used for the search vector
   - If OpenAI fails, the item is still saved with its vector and empty tags
     (None = needs review), instead of being lost.
-
-Install:
-  pip install fastapi uvicorn python-multipart torch transformers pillow \
-              psycopg[binary] pgvector python-dotenv openai
 
 Env vars:
   DATABASE_URL        - Postgres with the pgvector extension
@@ -24,8 +19,6 @@ Env vars:
   OPENAI_MODEL        - optional, default "gpt-5-mini"
   ITEMS_TABLE         - optional, table to write to (default "items")
 
-Run:
-  uvicorn tagging_worker_4:app --reload
 """
 
 import base64
@@ -56,23 +49,24 @@ ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "items")
 # 1. The allowed tags. The model can only pick from these lists.
 # ---------------------------------------------------------------------------
 ALLOWED = {
-    "category":    ["top", "bottom", "outerwear", "footwear"],
+    "category":    ["top", "bottom", "footwear"],
     "subcategory": ["t-shirts", "polos", "shirts", "hoodies", "sweatshirts", "jackets",
                     "shorts", "jeans", "sweatpants",
-                    "coats", "shoes"],
+                    "coats", "shoes", "sandals"],
     "color":       ["black", "white", "grey", "blue", "beige", "brown",
                     "green", "red", "orange", "pink", "yellow", "purple",
                     "multicolor"],
     "pattern":     ["solid", "striped", "checked", "floral", "graphic", "camo"],
     "formality":   ["casual", "smart casual", "business casual", "formal"],
+    "sleeve":      ["short", "long", "none"],
 }
 
 # Only the borderline shades that tend to get mislabelled.
 COLOR_GUIDE = {
     "black":  "incl. faded/washed black, black denim; faded denim is black, even with a cool tint",
-    "grey":   "incl. charcoal, dark slate; mottled, speckled or heathered fabric or any dull cool shade is grey, even with a cool tint",
+    "grey":   "incl. charcoal, slate, heather",
     "white":  "incl. off-white, cream, ivory, chalk; any very light shade with only a faint warm tint is white",
-    "blue":   "incl. navy, indigo, mid-blue, light blue; only clearly saturated shades, never dull or muted ones",
+    "blue":   "incl. navy, indigo, mid-blue, light blue; never dull or muted shades",
     "beige":  "only pale sand or cream-tan; never mid-tone",
     "brown":  "incl. tan, camel, taupe, khaki, chocolate; any mid-tone tan or taupe is brown, even when muted",
     "green":  "incl. olive, teal, forest, bottle; deep or dark shades are still green",
@@ -81,11 +75,31 @@ COLOR_GUIDE = {
     "purple": "incl. plum",
 }
 
+FOOTWEAR_SUBCATEGORIES = ("shoes", "sandals")
+
+# Only the subcategories that tend to get mixed up.
+SUBCATEGORY_GUIDE = {
+    "shoes":       "closed-toe, incl. sneakers, loafers and clogs",
+    "sandals":     "open footwear, incl. slides and flip-flops",
+    "polos":       "collar with a short button placket, short or long sleeve, incl. rugby shirts",
+    "shirts":      "buttons all the way down the front",
+    "hoodies":     "only when a hood is clearly visible, pullover or zip-up",
+    "sweatshirts": "pullover, no hood, no zip",
+    "jackets":     "zip-up or button-front, no hood, incl. high-collar zip tops",
+}
+
+# Only the formality levels that tend to get mixed up.
+FORMALITY_GUIDE = {
+    "smart casual": "polished but relaxed, incl. all loafers and polos",
+}
+
 # Instructions for the model.
 PROMPT = (
     "Classify this clothing item. Each value must be one of:\n"
     + json.dumps(ALLOWED)
-    + "\nColour notes: " + "; ".join(f"{k} {v}" for k, v in COLOR_GUIDE.items())
+    + "\nSubcategory notes: " + "; ".join(f"{k} {v}" for k, v in SUBCATEGORY_GUIDE.items())
+    + ".\nFormality notes: " + "; ".join(f"{k} {v}" for k, v in FORMALITY_GUIDE.items())
+    + ".\nColour notes: " + "; ".join(f"{k} {v}" for k, v in COLOR_GUIDE.items())
     + ".\nIn colors, list every fabric colour that stands out with its rough % "
     "of the item (adding up to 100), including thin stripes and trims. Keep light "
     "and dark shades of one colour as separate entries. Ignore logos and printed graphics.\n"
@@ -206,8 +220,14 @@ def validate(tags: dict) -> dict:
     for attribute, options in ALLOWED.items():
         value = str(tags.get(attribute, "")).lower().strip()
         clean[attribute] = value if value in options else None  # None = needs review
-    if clean["category"] == "footwear" or clean["subcategory"] == "shoes":
-        clean["category"], clean["subcategory"] = "footwear", "shoes"
+    # Footwear subcategories and the footwear category always go together
+    # (tags can disagree), defaulting to shoes
+    if clean["subcategory"] in FOOTWEAR_SUBCATEGORIES:
+        clean["category"] = "footwear"
+    elif clean["category"] == "footwear":
+        clean["subcategory"] = "shoes"
+    if clean["category"] in ("bottom", "footwear"):
+        clean["sleeve"] = "none"  # only tops have sleeves
     clean["color"], clean["colors"] = color_from_shares(tags.get("colors"), clean["pattern"])
     # Camo is always multicolor, even when the model lists its shades as one colour
     if clean["pattern"] == "camo" and clean["color"] is not None:
@@ -273,8 +293,10 @@ def color_from_shares(raw, pattern=None) -> tuple[str | None, list[str] | None]:
 #    Table:  CREATE EXTENSION vector;
 #            CREATE TABLE items (id uuid PRIMARY KEY, image_path text,
 #              original_filename text, category text, subcategory text, color text,
-#              colors text[], pattern text, formality text, clip_vec vector(512));
+#              colors text[], pattern text, formality text, sleeve text,
+#              clip_vec vector(512));
 #    Existing table:  ALTER TABLE items ADD COLUMN colors text[];
+#                     ALTER TABLE items ADD COLUMN sleeve text;
 # ---------------------------------------------------------------------------
 def save_item(item_id, image_path, original_filename, tags, vector):
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
@@ -282,11 +304,11 @@ def save_item(item_id, image_path, original_filename, tags, vector):
         conn.execute(
             psycopg.sql.SQL(
                 """INSERT INTO {} (id, image_path, original_filename, category,
-                                  subcategory, color, colors, pattern, formality, clip_vec)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+                                  subcategory, color, colors, pattern, formality, sleeve, clip_vec)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
             ).format(psycopg.sql.Identifier(ITEMS_TABLE)),
             (item_id, image_path, original_filename, tags["category"], tags["subcategory"],
-             tags["color"], tags["colors"], tags["pattern"], tags["formality"], vector),
+             tags["color"], tags["colors"], tags["pattern"], tags["formality"], tags["sleeve"], vector),
         )
 
 

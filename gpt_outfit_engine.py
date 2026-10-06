@@ -2,7 +2,7 @@
 Outfit engine for the wardrobe app.
 
 Turns a request like "dinner date tonight, we'll walk around outside" into
-2-3 outfits built only from items already tagged by tagging_worker_2.py.
+2-3 outfits built only from items already tagged by tagging_worker_4.py.
 
   1. Parse   - GPT turns the request into tag filters + a style description
   2. Retrieve - Postgres filters by tags, then CLIP ranks items by similarity
@@ -10,9 +10,9 @@ Turns a request like "dinner date tonight, we'll walk around outside" into
   3. Generate - GPT picks items from the shortlist and builds outfits
   4. Validate - code checks every item exists and each outfit is complete
 
-It reuses ALLOWED and CLIP from tagging_worker_2.py so the tag lists live in
+It reuses ALLOWED and CLIP from tagging_worker_4.py so the tag lists live in
 one place, but calls GPT (OpenAI) for the parsing/generation steps.
-Put this file next to tagging_worker_2.py.
+Put this file next to tagging_worker_4.py.
 
 Reads items from the view_items_2 table (see view_items_2.sql).
 
@@ -40,7 +40,7 @@ from openai import OpenAI
 from pgvector.psycopg import register_vector
 from pydantic import BaseModel
 
-from tagging_worker_2 import ALLOWED, _as_tensor, app, clip_model, clip_proc
+from tagging_worker_4 import ALLOWED, _as_tensor, app, load_clip
 
 llm = OpenAI()  # reads OPENAI_API_KEY
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -51,9 +51,10 @@ ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "view_items_2")
 # How many candidates to shortlist per category before GPT chooses.
 PER_CATEGORY = 6
 
-# Outfit slots. An outfit is (top + bottom) or a dress, plus footwear,
-# with outerwear as an optional layer.
-SLOTS = ["top", "bottom", "dress", "outerwear", "footwear"]
+# Outfit slots. An outfit is top + bottom, plus footwear, with outerwear as an
+# optional layer. Items are only tagged top/bottom/footwear; which of them can
+# be outerwear comes from DUAL_SLOT_SUBCATEGORIES below.
+SLOTS = ["top", "bottom", "outerwear", "footwear"]
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,7 @@ def parse_request(request: str) -> dict:
 # ---------------------------------------------------------------------------
 def clip_text_vector(text: str) -> np.ndarray:
     """Put the style description on the same 'meaning map' as the item photos."""
+    clip_model, clip_proc = load_clip()
     with torch.no_grad():
         inputs = clip_proc(text=[text], return_tensors="pt", padding=True)
         vec = _as_tensor(clip_model.get_text_features(**inputs))
@@ -100,13 +102,19 @@ def clip_text_vector(text: str) -> np.ndarray:
     return vec[0].numpy().astype(np.float32)
 
 
-ITEM_COLUMNS = "id, image_path, original_filename, category, subcategory, color, pattern, formality"
+ITEM_COLUMNS = ("id, image_path, original_filename, category, subcategory, sleeve, color, "
+                "colors, pattern, formality")
 
 # Items whose subcategory can fill more than one outfit slot (e.g. a hoodie
 # works as a top on its own, or as a light layer over another top). Hardcoded
 # here rather than a proper multi-category schema - revisit if more
 # dual-purpose subcategories turn up.
-DUAL_SLOT_SUBCATEGORIES = {"hoodies, sweatshirts & jackets": {"top", "outerwear"}}
+DUAL_SLOT_SUBCATEGORIES = {
+    "hoodies":     {"top", "outerwear"},
+    "sweatshirts": {"top", "outerwear"},
+    "jackets":     {"top", "outerwear"},
+    "coats":       {"outerwear"},
+}
 
 
 def eligible_slots(item: dict) -> set:
@@ -121,22 +129,26 @@ def fetch_candidates(constraints: dict) -> list[dict]:
 
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         register_vector(conn)
-        for category in ALLOWED["category"]:
-            # Dual-slot subcategories (e.g. hoodies) are also candidates here even
-            # when their stored category is the other slot they can also fill.
+        for slot in SLOTS:
+            # Subcategories that can fill this slot (e.g. hoodies for outerwear),
+            # and ones that can't even though their category matches (coats are
+            # tagged top but only work as outerwear).
             extra_subcats = [sub for sub, slots in DUAL_SLOT_SUBCATEGORIES.items()
-                             if category in slots]
+                             if slot in slots]
+            excluded_subcats = [sub for sub, slots in DUAL_SLOT_SUBCATEGORIES.items()
+                                if slot not in slots]
 
             # Tag filters first. Items with a missing (None) tag are let through.
             rows = conn.execute(
                 psycopg.sql.SQL(
                     f"""SELECT {ITEM_COLUMNS} FROM {{}}
                         WHERE (category = %s OR subcategory = ANY(%s::text[]))
+                          AND COALESCE(subcategory, '') <> ALL(%s::text[])
                           AND (formality IS NULL OR formality = ANY(%s))
                         ORDER BY clip_vec <=> %s::vector
                         LIMIT %s"""
                 ).format(table),
-                (category, extra_subcats, constraints["formality"],
+                (slot, extra_subcats, excluded_subcats, constraints["formality"],
                  query_vec, PER_CATEGORY),
             ).fetchall()
             fits = True
@@ -148,10 +160,11 @@ def fetch_candidates(constraints: dict) -> list[dict]:
                     psycopg.sql.SQL(
                         f"""SELECT {ITEM_COLUMNS} FROM {{}}
                             WHERE (category = %s OR subcategory = ANY(%s::text[]))
+                              AND COALESCE(subcategory, '') <> ALL(%s::text[])
                             ORDER BY clip_vec <=> %s::vector
                             LIMIT 3"""
                     ).format(table),
-                    (category, extra_subcats, query_vec),
+                    (slot, extra_subcats, excluded_subcats, query_vec),
                 ).fetchall()
                 fits = False
 
@@ -170,8 +183,13 @@ def fetch_candidates(constraints: dict) -> list[dict]:
 # 3. Generate outfits with GPT.
 # ---------------------------------------------------------------------------
 def describe(short_id: str, item: dict) -> str:
-    tags = " | ".join(str(item.get(k) or "?") for k in
-                      ("category", "subcategory", "color", "pattern", "formality"))
+    color = item.get("color") or "?"
+    if color == "multicolor" and item.get("colors"):
+        color = f"multicolor ({', '.join(item['colors'])})"
+    slots = "/".join(s for s in SLOTS if s in eligible_slots(item))
+    tags = " | ".join([slots, str(item.get("subcategory") or "?"),
+                       f"{item.get('sleeve') or '?'} sleeve", color,
+                       str(item.get("pattern") or "?"), str(item.get("formality") or "?")])
     note = "" if item["fits_filters"] else "  (doesn't match the filters; use only if needed)"
     return f"{short_id}: {tags}  [{item.get('original_filename') or ''}]{note}"
 
@@ -185,19 +203,23 @@ def generate_outfits(request: str, constraints: dict, items_by_short_id: dict,
         "You are a personal stylist for someone in Singapore.\n\n"
         f'Request: "{request}"\n'
         f"Target formality: {constraints['formality']}\n\n"
-        "Wardrobe items (id: category | subcategory | color | pattern | formality):\n"
+        "Wardrobe items (id: slots it can fill | subcategory | sleeve | color | pattern | formality):\n"
         f"{listing}\n\n"
         f"Build up to {n} different outfits using ONLY the ids above. Rules:\n"
-        "- Each outfit is either a top + bottom, or a dress.\n"
+        "- Each outfit is a top + bottom.\n"
+        "- Every outfit must be complete: if a slot only has items marked "
+        "\"doesn't match the filters\", still use the best of them rather than "
+        "leaving the slot empty.\n"
         + ("- Each outfit must include footwear.\n" if has_footwear else "")
         + "- Add outerwear only when the request implies a cold or air-conditioned "
         "setting (e.g. a movie theatre, cold restaurant, office); leave it out otherwise.\n"
-        "- Put each id only in the slot matching its category (a hoodie/sweatshirt "
-        "may go in either top or outerwear, but not both in the same outfit).\n"
+        "- Put each id only in a slot it can fill (hoodies, sweatshirts and jackets "
+        "may be the top or the outerwear, but not both in the same outfit; coats "
+        "are outerwear only).\n"
         "- Consider color harmony and avoid clashing patterns.\n"
         "- Make the outfits meaningfully different from each other.\n\n"
         'Reply with ONLY JSON: {"outfits": [{"top": id or null, "bottom": id or null, '
-        '"dress": id or null, "outerwear": id or null, "footwear": id or null, '
+        '"outerwear": id or null, "footwear": id or null, '
         '"title": "short catchy outfit name", '
         '"reason": "one or two friendly sentences on why it works"}]}'
     )
@@ -243,10 +265,8 @@ def validate_outfits(raw_outfits: list, items_by_short_id: dict) -> list[dict]:
         if outerwear_eligible > 1:
             continue
 
-        has_base = ("top" in chosen and "bottom" in chosen) or "dress" in chosen
+        has_base = "top" in chosen and "bottom" in chosen
         if not has_base or (has_footwear and "footwear" not in chosen):
-            continue
-        if "dress" in chosen and ("top" in chosen or "bottom" in chosen):
             continue
 
         key = frozenset(i["id"] for i in chosen.values())
@@ -275,10 +295,9 @@ def recommend(request: str, n: int = 3) -> dict:
     items_by_short_id = {f"A{i + 1}": item for i, item in enumerate(candidates)}
 
     categories = {i["category"] for i in candidates}
-    if not ({"top", "bottom"} <= categories or "dress" in categories):
+    if not {"top", "bottom"} <= categories:
         return {"constraints": constraints, "outfits": [],
-                "message": "Not enough items yet: tag at least one top and one "
-                           "bottom, or a dress."}
+                "message": "Not enough items yet: tag at least one top and one bottom."}
 
     outfits = []
     for _attempt in range(2):  # one retry if GPT's first answer is unusable
