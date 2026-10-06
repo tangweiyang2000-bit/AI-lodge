@@ -36,8 +36,6 @@ import json
 import os
 import traceback
 import uuid
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
 import torch
@@ -270,26 +268,6 @@ def color_from_shares(raw, pattern=None) -> tuple[str | None, list[str] | None]:
     return top_name, None
 
 
-def tag_with_vote(image_bytes: bytes, media_type: str) -> tuple[dict, str]:
-    """Tag twice in parallel; if the two colours disagree, tag a third time.
-
-    The colour most runs agree on wins, and its run supplies all the tags.
-    Returns (validated tags, a short note for the terminal log).
-    """
-    def run(_):
-        return validate(tag_with_openai(image_bytes, media_type))
-    with ThreadPoolExecutor(2) as pool:
-        runs = list(pool.map(run, range(2)))
-    if runs[0]["color"] == runs[1]["color"]:
-        return runs[0], "2 runs agreed"
-    runs.append(run(2))
-    color, votes = Counter(r["color"] for r in runs).most_common(1)[0]
-    colors = [r["color"] for r in runs]
-    if votes == 1:  # all three differ: keep the first, flag it in the log
-        return runs[0], f"3 runs all disagreed {colors}, kept the first"
-    return next(r for r in runs if r["color"] == color), f"2 of 3 runs agreed {colors}"
-
-
 # ---------------------------------------------------------------------------
 # 5. Save tags + vector.
 #    Table:  CREATE EXTENSION vector;
@@ -332,8 +310,8 @@ def tagging_worker(item_id: str, image_path: str,
         return
 
     try:
-        tags, note = tag_with_vote(image_bytes, media_type)
-        print(f"[TAGGED] {item_id}: {tags}  ({note})")
+        tags = validate(tag_with_openai(image_bytes, media_type))
+        print(f"[TAGGED] {item_id}: {tags}")
     except Exception:
         # OpenAI down or broken: keep the vector, leave tags for review
         traceback.print_exc()
