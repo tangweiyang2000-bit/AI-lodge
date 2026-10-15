@@ -60,7 +60,15 @@ SLOTS = ["top", "bottom", "outerwear", "footwear"]
 # ---------------------------------------------------------------------------
 # 1. Parse the request into filters.
 # ---------------------------------------------------------------------------
+def wardrobe_names() -> dict:
+    """original_filename -> category, so the parser can match items named in a request."""
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        return dict(conn.execute(psycopg.sql.SQL("SELECT original_filename, category FROM {}")
+                                 .format(psycopg.sql.Identifier(ITEMS_TABLE))).fetchall())
+
+
 def parse_request(request: str) -> dict:
+    names = wardrobe_names()
     prompt = (
         "A user in Singapore wants an outfit. Their request:\n"
         f'"{request}"\n\n'
@@ -68,7 +76,24 @@ def parse_request(request: str) -> dict:
         '- "formality": list of acceptable values from '
         f"{ALLOWED['formality']}\n"
         '- "search_text": one short English sentence describing the ideal outfit\'s '
-        'look, e.g. "a relaxed smart-casual outfit for a warm evening"\n\n'
+        'look, e.g. "a relaxed smart-casual outfit for a warm evening"\n'
+        '- "needs_warm_layer": true if the setting is cold or air-conditioned '
+        '(e.g. a movie theatre, cold restaurant, office, plane), otherwise false\n'
+        '- "is_active": true if the request is a physical activity '
+        '(e.g. jogging, gym, sports, hiking), otherwise false\n'
+        '- "is_messy": true if the request involves food likely to splash or stain '
+        '(e.g. mala, hotpot, BBQ, chilli crab, curry), otherwise false\n'
+        '- "required_subcategories": ONLY clothing types the user literally names in '
+        'their request (never ones you would suggest for the situation), '
+        f'as values from {ALLOWED["subcategory"]} (e.g. slides or flip-flops are '
+        '"sandals", sneakers are "shoes"); [] if none are named\n'
+        '- "required_color": if the user wants the whole outfit in one colour '
+        f'(e.g. "full white", "all black"), that colour from {ALLOWED["color"]}; '
+        'otherwise null\n'
+        '- "named_items": ONLY specific items of the user\'s own that the request '
+        'literally refers to (never ones you would pick for the situation) '
+        '(e.g. "my air force" means the files containing af1), as file names from '
+        f'this wardrobe: {sorted(names)}; [] if none\n\n'
         "Be generous: include every formality level that could work."
     )
     resp = llm.chat.completions.create(
@@ -86,7 +111,70 @@ def parse_request(request: str) -> dict:
         values = [v for v in values if v in ALLOWED[attribute]]
         constraints[attribute] = values or list(ALLOWED[attribute])
     constraints["search_text"] = str(raw.get("search_text") or request)
+    constraints["needs_warm_layer"] = raw.get("needs_warm_layer") is True
+    constraints["is_active"] = raw.get("is_active") is True
+    constraints["is_messy"] = raw.get("is_messy") is True
+    text = request.lower()
+    named = [str(x).lower().strip() for x in raw.get("required_subcategories") or []]
+    constraints["required"] = required_slots([x for x in named if x in ALLOWED["subcategory"]
+                                              and mentioned(x, text)])
+    color = str(raw.get("required_color") or "").lower().strip()
+    constraints["required_color"] = color if color in ALLOWED["color"] else None
+    named = {}
+    for name in raw.get("named_items") or []:
+        if name in names and mentioned(name, text):
+            named.setdefault(names[name], []).append(name)  # slot = its category
+    constraints["named"] = named
     return constraints
+
+
+# Words in a request that count as naming a subcategory or a specific item.
+# Anything the parser returns that the request never mentions is dropped,
+# so it can't invent requirements ("raining" must not require a jacket).
+SYNONYMS = {
+    "t-shirts": ["tee", "t-shirt", "tshirt"], "polos": ["polo"], "shirts": ["shirt", "button"],
+    "hoodies": ["hoodie"], "sweatshirts": ["sweatshirt", "sweater", "crewneck"],
+    "jackets": ["jacket"], "shorts": ["shorts"], "jeans": ["jeans", "denim"],
+    "sweatpants": ["sweatpants", "joggers"], "shoes": ["shoe", "sneaker", "trainer", "loafer"],
+    "sandals": ["sandal", "slide", "flip-flop", "flip flop"],
+    "af1": ["air force", "af1"],
+}
+
+
+def mentioned(value: str, text: str) -> bool:
+    """True if the request text names this subcategory or file (by its words)."""
+    if value in SYNONYMS:
+        return any(w in text for w in SYNONYMS[value])
+    # A file name like macos_16_white_af1.png counts only through a distinctive
+    # word (a brand or model such as af1/air force, ellesse, mclaren), not a
+    # colour or general garment word ("hoodie" names a type, not your item).
+    generic = {w for k, ws in SYNONYMS.items() if k != "af1" for w in ws} | (set(SYNONYMS) - {"af1"}) | {
+        "plain", "regular", "straight", "washed", "baggy", "printed", "striped", "dark", "light",
+        "button", "down", "sweatshorts", "slides", "clogs", "loafers", "tee", "hoodie", "jacket"}
+    words = value.removesuffix(".png").split("_")[2:]
+    return any(w in text or any(s in text for s in SYNONYMS.get(w, [])) for w in words
+               if w not in ALLOWED["color"] and w not in generic and len(w) > 2)
+
+
+BOTTOM_SUBCATEGORIES = ("shorts", "jeans", "sweatpants")
+FOOTWEAR_SUBCATEGORIES = ("shoes", "sandals")
+
+
+def required_slots(subcategories: list[str]) -> dict:
+    """Map the clothing types a user named to outfit slots, e.g. hoodies ->
+    top, jeans -> bottom, sandals -> footwear. A second top-type item (a tee
+    and a jacket) becomes the outerwear."""
+    required = {}
+    for sub in dict.fromkeys(subcategories):
+        if sub in FOOTWEAR_SUBCATEGORIES:
+            required.setdefault("footwear", sub)
+        elif sub in BOTTOM_SUBCATEGORIES:
+            required.setdefault("bottom", sub)
+        elif "top" not in required:
+            required["top"] = sub
+        else:
+            required.setdefault("outerwear", sub)
+    return required
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +191,7 @@ def clip_text_vector(text: str) -> np.ndarray:
 
 
 ITEM_COLUMNS = ("id, image_path, original_filename, category, subcategory, sleeve, color, "
-                "colors, pattern, formality")
+                "shade, colors, pattern, formality")
 
 # Items whose subcategory can fill more than one outfit slot (e.g. a hoodie
 # works as a top on its own, or as a light layer over another top). Hardcoded
@@ -113,12 +201,32 @@ DUAL_SLOT_SUBCATEGORIES = {
     "hoodies":     {"top", "outerwear"},
     "sweatshirts": {"top", "outerwear"},
     "jackets":     {"top", "outerwear"},
-    "coats":       {"outerwear"},
 }
 
 
 def eligible_slots(item: dict) -> set:
     return DUAL_SLOT_SUBCATEGORIES.get(item.get("subcategory"), {item["category"]})
+
+
+# For physical activities, only these items are shortlisted per slot (same
+# rules validate_outfits enforces). No outerwear slot at all.
+# Light shades show stains, so they're kept out of tops and bottoms for messy food.
+MESSY_SLOT_FILTER = "COALESCE(shade, '') <> 'light'"
+
+# Smart requests (casual not among the wanted formality levels) never use
+# sweatpants or shorts.
+CASUAL_ONLY_BOTTOMS = ("shorts", "sweatpants")
+SMART_BOTTOM_FILTER = "subcategory NOT IN ('shorts', 'sweatpants')"
+
+
+def is_smart(constraints: dict) -> bool:
+    return "casual" not in constraints["formality"]
+
+ACTIVE_SLOT_FILTERS = {
+    "top":      "sleeve = 'short'",
+    "bottom":   "subcategory IN ('shorts', 'sweatpants')",
+    "footwear": "subcategory <> 'sandals' AND formality = 'casual'",
+}
 
 
 def fetch_candidates(constraints: dict) -> list[dict]:
@@ -130,25 +238,42 @@ def fetch_candidates(constraints: dict) -> list[dict]:
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         register_vector(conn)
         for slot in SLOTS:
-            # Subcategories that can fill this slot (e.g. hoodies for outerwear),
-            # and ones that can't even though their category matches (coats are
-            # tagged top but only work as outerwear).
+            active = constraints.get("is_active")
+            if active and slot not in ACTIVE_SLOT_FILTERS:
+                continue  # no outerwear for physical activities
+            filters = [ACTIVE_SLOT_FILTERS[slot]] if active else []
+            if constraints.get("is_messy") and slot in ("top", "bottom", "outerwear"):
+                filters.append(MESSY_SLOT_FILTER)
+            if is_smart(constraints) and slot == "bottom":
+                filters.append(SMART_BOTTOM_FILTER)
+            required = constraints.get("required", {})
+            if "outerwear" in required and "top" in required and slot == "outerwear":
+                pass  # handled by the filter below
+            elif slot == "outerwear" and required and "outerwear" not in required:
+                continue  # user named their pieces; don't add an unasked layer
+            if slot in required:
+                filters.append(f"subcategory = '{required[slot]}'")
+            named = constraints.get("named", {})
+            if slot in named:
+                filters.append("original_filename IN ("
+                               + ", ".join("'" + n.replace("'", "''") + "'" for n in named[slot]) + ")")
+            elif constraints.get("required_color"):
+                filters.append(f"color = '{constraints['required_color']}'")
+            active_filter = psycopg.sql.SQL("".join(f" AND {f}" for f in filters))
+            # Subcategories that can also fill this slot (e.g. hoodies for outerwear).
             extra_subcats = [sub for sub, slots in DUAL_SLOT_SUBCATEGORIES.items()
                              if slot in slots]
-            excluded_subcats = [sub for sub, slots in DUAL_SLOT_SUBCATEGORIES.items()
-                                if slot not in slots]
 
             # Tag filters first. Items with a missing (None) tag are let through.
             rows = conn.execute(
                 psycopg.sql.SQL(
                     f"""SELECT {ITEM_COLUMNS} FROM {{}}
                         WHERE (category = %s OR subcategory = ANY(%s::text[]))
-                          AND COALESCE(subcategory, '') <> ALL(%s::text[])
-                          AND (formality IS NULL OR formality = ANY(%s))
+                          AND (formality IS NULL OR formality = ANY(%s)){{}}
                         ORDER BY clip_vec <=> %s::vector
                         LIMIT %s"""
-                ).format(table),
-                (slot, extra_subcats, excluded_subcats, constraints["formality"],
+                ).format(table, active_filter),
+                (slot, extra_subcats, constraints["formality"],
                  query_vec, PER_CATEGORY),
             ).fetchall()
             fits = True
@@ -159,12 +284,11 @@ def fetch_candidates(constraints: dict) -> list[dict]:
                 rows = conn.execute(
                     psycopg.sql.SQL(
                         f"""SELECT {ITEM_COLUMNS} FROM {{}}
-                            WHERE (category = %s OR subcategory = ANY(%s::text[]))
-                              AND COALESCE(subcategory, '') <> ALL(%s::text[])
+                            WHERE (category = %s OR subcategory = ANY(%s::text[])){{}}
                             ORDER BY clip_vec <=> %s::vector
                             LIMIT 3"""
-                    ).format(table),
-                    (slot, extra_subcats, excluded_subcats, query_vec),
+                    ).format(table, active_filter),
+                    (slot, extra_subcats, query_vec),
                 ).fetchall()
                 fits = False
 
@@ -188,7 +312,7 @@ def describe(short_id: str, item: dict) -> str:
         color = f"multicolor ({item['colors']})"
     slots = "/".join(s for s in SLOTS if s in eligible_slots(item))
     tags = " | ".join([slots, str(item.get("subcategory") or "?"),
-                       f"{item.get('sleeve') or '?'} sleeve", color,
+                       f"{item.get('sleeve') or '?'} sleeve", f"{item.get('shade') or '?'} {color}",
                        str(item.get("pattern") or "?"), str(item.get("formality") or "?")])
     note = "" if item["fits_filters"] else "  (doesn't match the filters; use only if needed)"
     return f"{short_id}: {tags}  [{item.get('original_filename') or ''}]{note}"
@@ -211,11 +335,33 @@ def generate_outfits(request: str, constraints: dict, items_by_short_id: dict,
         "\"doesn't match the filters\", still use the best of them rather than "
         "leaving the slot empty.\n"
         + ("- Each outfit must include footwear.\n" if has_footwear else "")
-        + "- Add outerwear only when the request implies a cold or air-conditioned "
-        "setting (e.g. a movie theatre, cold restaurant, office); leave it out otherwise.\n"
+        + ("- The setting is cold: every outfit MUST be warm, meaning a long-sleeve "
+           "top, or outerwear over a short-sleeve top.\n"
+           if constraints.get("needs_warm_layer") else
+           "- Leave out outerwear; the setting isn't cold.\n")
+        + ("- This is a physical activity: use only short-sleeve tops, shorts or "
+           "sweatpants, and sneakers (no sandals, slides, loafers or clogs), and no outerwear.\n"
+           if constraints.get("is_active") else "")
+        + ("- The user asked for these pieces; every outfit must use them: "
+           + ", ".join(f"{sub} as the {slot}" for slot, sub in constraints["required"].items()) + ".\n"
+           if constraints.get("required") else "")
+        + ("- The user asked for these specific items of theirs; use one of them in "
+           "that slot in every outfit: "
+           + "; ".join(f"{slot}: {', '.join(ns)}" for slot, ns in constraints["named"].items()) + ".\n"
+           if constraints.get("named") else "")
+        + (f"- The whole outfit must be {constraints['required_color']}"
+           + (" (except the specific items above)" if constraints.get("named") else "")
+           + ".\n"
+           if constraints.get("required_color") else "")
+        + ("- This is a smart occasion: never use sweatpants or shorts.\n"
+           if is_smart(constraints) else "")
+        + ("- The food may splash or stain: avoid light-shade tops and bottoms; "
+           "prefer dark shades.\n"
+           if constraints.get("is_messy") else "")
+        + "- Never put outerwear over a long-sleeve top; outerwear only goes over "
+        "short-sleeve tops.\n"
         "- Put each id only in a slot it can fill (hoodies, sweatshirts and jackets "
-        "may be the top or the outerwear, but not both in the same outfit; coats "
-        "are outerwear only).\n"
+        "may be the top or the outerwear, but not both in the same outfit).\n"
         "- Consider color harmony and avoid clashing patterns.\n"
         "- Make the outfits meaningfully different from each other.\n\n"
         'Reply with ONLY JSON: {"outfits": [{"top": id or null, "bottom": id or null, '
@@ -235,7 +381,15 @@ def generate_outfits(request: str, constraints: dict, items_by_short_id: dict,
 # ---------------------------------------------------------------------------
 # 4. Validate: GPT can invent ids or put items in the wrong slot.
 # ---------------------------------------------------------------------------
-def validate_outfits(raw_outfits: list, items_by_short_id: dict) -> list[dict]:
+ACTIVE_BOTTOMS = ("shorts", "sweatpants")
+
+
+def validate_outfits(raw_outfits: list, items_by_short_id: dict,
+                     needs_warm_layer: bool = False, is_active: bool = False,
+                     is_messy: bool = False, smart: bool = False,
+                     required: dict | None = None,
+                     required_color: str | None = None,
+                     named: dict | None = None) -> list[dict]:
     has_footwear = any(i["category"] == "footwear" for i in items_by_short_id.values())
     valid, seen = [], set()
 
@@ -247,7 +401,9 @@ def validate_outfits(raw_outfits: list, items_by_short_id: dict) -> list[dict]:
             short_id = outfit.get(slot)
             if not short_id:
                 continue
-            item = items_by_short_id.get(str(short_id).strip())
+            # GPT sometimes drops the "A" prefix (8 instead of A8): accept both
+            key = str(short_id).strip().upper()
+            item = items_by_short_id.get(key) or items_by_short_id.get(f"A{key}")
             if item is None or slot not in eligible_slots(item):  # invented id / wrong slot
                 ok = False
                 break
@@ -264,6 +420,43 @@ def validate_outfits(raw_outfits: list, items_by_short_id: dict) -> list[dict]:
         outerwear_eligible = sum(1 for i in chosen.values() if "outerwear" in eligible_slots(i))
         if outerwear_eligible > 1:
             continue
+        # Outerwear only goes over short-sleeve tops, never over long sleeves.
+        top_sleeve = chosen.get("top", {}).get("sleeve")
+        if "outerwear" in chosen and top_sleeve == "long":
+            continue
+        # Cold settings need warmth: a long-sleeve top, or outerwear over a
+        # short-sleeve one.
+        if needs_warm_layer and top_sleeve != "long" and "outerwear" not in chosen:
+            continue
+        # Pieces the user asked for by name must be in the outfit.
+        if required and any(chosen.get(slot, {}).get("subcategory") != sub
+                            for slot, sub in required.items()):
+            continue
+        # Specific items the user named ("my air force") must fill their slot.
+        named = named or {}
+        if any(chosen.get(slot, {}).get("original_filename") not in ns for slot, ns in named.items()):
+            continue
+        # Whole-outfit colour the user asked for ("full white"): every piece
+        # except the specific items they named.
+        if required_color and any(i.get("color") != required_color
+                                  for slot, i in chosen.items() if slot not in named):
+            continue
+        # Smart occasions: no sweatpants or shorts.
+        if smart and chosen["bottom"].get("subcategory") in CASUAL_ONLY_BOTTOMS:
+            continue
+        # Messy food: no light-shade tops, bottoms or outerwear (stains show).
+        if is_messy and any(chosen[s].get("shade") == "light"
+                            for s in ("top", "bottom", "outerwear") if s in chosen):
+            continue
+        # Physical activity: short sleeves, sporty bottoms, casual non-sandal
+        # footwear (loafers are smart casual), no outerwear.
+        if is_active:
+            shoe = chosen.get("footwear", {})
+            if (top_sleeve != "short" or "outerwear" in chosen
+                    or chosen["bottom"].get("subcategory") not in ACTIVE_BOTTOMS
+                    or shoe.get("subcategory") == "sandals"
+                    or (shoe and shoe.get("formality") != "casual")):
+                continue
 
         has_base = "top" in chosen and "bottom" in chosen
         if not has_base or (has_footwear and "footwear" not in chosen):
@@ -302,7 +495,10 @@ def recommend(request: str, n: int = 3) -> dict:
     outfits = []
     for _attempt in range(2):  # one retry if GPT's first answer is unusable
         raw = generate_outfits(request, constraints, items_by_short_id, n)
-        outfits = validate_outfits(raw, items_by_short_id)[:n]
+        outfits = validate_outfits(raw, items_by_short_id, constraints["needs_warm_layer"],
+                                   constraints["is_active"], constraints["is_messy"],
+                                   is_smart(constraints), constraints["required"],
+                                   constraints["required_color"], constraints["named"])[:n]
         if outfits:
             break
 

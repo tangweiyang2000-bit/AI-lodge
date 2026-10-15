@@ -1,18 +1,29 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- One row per clothing item, written by tagging_worker_4.py (12 columns).
 CREATE TABLE IF NOT EXISTS items (
   id uuid PRIMARY KEY,
   image_path text,
   original_filename text,
-  category text,
-  subcategory text,
-  color text,
-  pattern text,
-  formality text,
-  clip_vec vector(512)
+  category text,          -- top | bottom | footwear
+  subcategory text,       -- t-shirts, polos, shirts, hoodies, sweatshirts, jackets,
+                          -- shorts, jeans, sweatpants, shoes, sandals
+  color text,             -- main colour, or 'multicolor'
+  colors text,            -- comma-separated colours when multicolor, else 'none'
+  pattern text,           -- solid | striped | checked | dotted | floral | graphic | camo
+  formality text,         -- casual | smart casual | business casual | formal
+  sleeve text,            -- short | long | none
+  shade text,             -- light | dark
+  clip_vec vector(512)    -- CLIP image embedding
 );
 
--- view_items_2 is the read view outfit_engine_3.py queries by default (ITEMS_TABLE).
--- It must stay a VIEW, not a table: tagging_worker_2.py only ever writes to `items`,
+-- Databases created from the older 9-column version: add the newer columns.
+-- Safe to re-run; does nothing if the columns already exist.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS colors text;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS sleeve text;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS shade text;
+
+-- view_items_2 is the read view gpt_outfit_engine.py queries by default (ITEMS_TABLE).
+-- It must stay a VIEW, not a table: tagging_worker_4.py only ever writes to `items`,
 -- so a separate table here would silently go stale.
 CREATE OR REPLACE VIEW view_items_2 AS SELECT * FROM items;

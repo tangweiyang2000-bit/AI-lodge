@@ -16,7 +16,7 @@ What's new in version 4:
 Env vars:
   DATABASE_URL        - Postgres with the pgvector extension
   OPENAI_API_KEY      - OpenAI API key
-  OPENAI_MODEL        - optional, default "gpt-5-mini"
+  OPENAI_MODEL        - optional, default "gpt-4.1-mini"
   ITEMS_TABLE         - optional, table to write to (default "items")
 
 """
@@ -52,28 +52,30 @@ ALLOWED = {
     "category":    ["top", "bottom", "footwear"],
     "subcategory": ["t-shirts", "polos", "shirts", "hoodies", "sweatshirts", "jackets",
                     "shorts", "jeans", "sweatpants",
-                    "coats", "shoes", "sandals"],
+                    "shoes", "sandals"],
     "color":       ["black", "white", "grey", "blue", "beige", "brown",
                     "green", "red", "orange", "pink", "yellow", "purple",
                     "multicolor"],
-    "pattern":     ["solid", "striped", "checked", "floral", "graphic", "camo"],
+    "pattern":     ["solid", "striped", "checked", "dotted", "floral", "graphic", "camo"],
     "formality":   ["casual", "smart casual", "business casual", "formal"],
     "sleeve":      ["short", "long", "none"],
+    "shade":       ["light", "dark"],
 }
 
 # Only the borderline shades that tend to get mislabelled.
 COLOR_GUIDE = {
-    "black":  "incl. faded/washed black, black denim; faded denim is black, even with a cool tint",
+    "black":  "incl. washed black and very dark, faded denim",
     "grey":   "incl. charcoal, slate, heather",
-    "white":  "incl. off-white, cream, ivory, chalk; any very light shade with only a faint warm tint is white",
-    "blue":   "incl. navy, indigo, mid-blue, light blue; never dull or muted shades",
-    "beige":  "only pale sand or cream-tan; never mid-tone",
-    "brown":  "incl. tan, camel, taupe, khaki, chocolate; any mid-tone tan or taupe is brown, even when muted",
-    "green":  "incl. olive, teal, forest, bottle; deep or dark shades are still green",
-    "red":    "incl. crimson, raspberry, burgundy; any saturated or deep shade is red",
-    "pink":   "only pale pink; never saturated or deep",
+    "white":  "incl. off-white, cream, ivory, chalk, and warm-toned or aged off-white",
+    "blue":   "incl. navy, indigo, mid-blue, light blue",
+    "beige":  "only pale sand or cream-tan",
+    "brown":  "incl. tan, camel, taupe, khaki, chocolate",
+    "green":  "incl. olive, teal, blue-green, forest, bottle",
+    "red":    "incl. raspberry and bright or deep pinkish-red",
+    "pink":   "only pale or pastel pink",
     "purple": "incl. plum",
 }
+
 
 FOOTWEAR_SUBCATEGORIES = ("shoes", "sandals")
 
@@ -83,14 +85,28 @@ SUBCATEGORY_GUIDE = {
     "sandals":     "open footwear, incl. slides and flip-flops",
     "polos":       "collar with a short button placket, short or long sleeve, incl. rugby shirts",
     "shirts":      "buttons all the way down the front",
-    "hoodies":     "only when a hood is clearly visible, pullover or zip-up",
+    "jackets":     "zip-up or button-front, no hood; a tall collar may look like a hood",
+    "hoodies":     "only with a real hood, often with drawstrings",
     "sweatshirts": "pullover, no hood, no zip",
-    "jackets":     "zip-up or button-front, no hood, incl. high-collar zip tops",
+}
+
+# Light vs dark: only pale shades count as light (they show stains).
+SHADE_GUIDE = {
+    "light": "white, cream, pastel or pale shades, incl. light grey",
+    "dark":  "everything else, incl. bright saturated colours and all browns, even taupe",
+}
+
+# Only the patterns that tend to get mixed up.
+PATTERN_GUIDE = {
+    "graphic": "large printed or embroidered logo, text or image",
+    "dotted":  "incl. pin dots, tiny, faint or tone-on-tone dot prints, even on dark fabric",
+    "solid":   "no print, incl. colour-blocked panels and small logos",
 }
 
 # Only the formality levels that tend to get mixed up.
 FORMALITY_GUIDE = {
     "smart casual": "polished but relaxed, incl. all loafers and polos",
+    "business casual": "incl. button-down shirts",
 }
 
 # Instructions for the model.
@@ -98,6 +114,8 @@ PROMPT = (
     "Classify this clothing item. Each value must be one of:\n"
     + json.dumps(ALLOWED)
     + "\nSubcategory notes: " + "; ".join(f"{k} {v}" for k, v in SUBCATEGORY_GUIDE.items())
+    + ".\nShade notes: " + "; ".join(f"{k} {v}" for k, v in SHADE_GUIDE.items())
+    + ".\nPattern notes: " + "; ".join(f"{k} {v}" for k, v in PATTERN_GUIDE.items())
     + ".\nFormality notes: " + "; ".join(f"{k} {v}" for k, v in FORMALITY_GUIDE.items())
     + ".\nColour notes: " + "; ".join(f"{k} {v}" for k, v in COLOR_GUIDE.items())
     + ".\nIn colors, list every fabric colour that stands out with its rough % "
@@ -122,7 +140,7 @@ PANEL_MIN = 6      # a "panel" smaller than this is just a trace and doesn't cou
 TAG_SCHEMA = {
     "type": "object",
     "properties": {
-        **{k: {"type": "string", "enum": v} for k, v in ALLOWED.items() if k != "color"},
+        **{k: {"type": "string", "enum": v} for k, v in ALLOWED.items() if k not in ("color", "shade")},
         "colors": {"type": "array", "items": {
             "type": "object",
             "properties": {
@@ -137,16 +155,18 @@ TAG_SCHEMA = {
             "required": ["color", "share", "kind"],
             "additionalProperties": False,
         }},
+        # shade comes after colors so the model judges it with the colours already named
+        # (before, it called mid-brown loafers light)
+        "shade": {"type": "string", "enum": ALLOWED["shade"]},
     },
-    "required": [*[k for k in ALLOWED if k != "color"], "colors"],
+    "required": [*[k for k in ALLOWED if k not in ("color", "shade")], "colors", "shade"],
     "additionalProperties": False,
 }
 
 # ---------------------------------------------------------------------------
 # 2. Load CLIP once when the server starts (not on every upload).
-#    Must match tagging_worker_2.py's CLIP_NAME: the outfit engines embed
-#    their search text with that file's model and compare it against the
-#    vectors stored here.
+#    gpt_outfit_engine.py embeds its search text with this same model
+#    (load_clip) and compares it against the vectors stored here.
 # ---------------------------------------------------------------------------
 CLIP_NAME = "patrickjohncyh/fashion-clip"
 
@@ -172,9 +192,15 @@ def clip_image_vector(img: Image.Image) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# 3. Tagging: OpenAI (GPT-5 mini by default).
+# 3. Tagging: OpenAI (GPT-4.1 mini at temperature 0 by default).
 # ---------------------------------------------------------------------------
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+# GPT-5 models don't take temperature; others run with randomness off
+# (model_consistency_test.py: gpt-4.1-mini 59/60 consistent vs 53/60 for gpt-5-mini).
+if OPENAI_MODEL.startswith("gpt-5"):
+    MODEL_SETTINGS = {"reasoning_effort": "low"}
+else:
+    MODEL_SETTINGS = {"temperature": 0, "seed": 42}
 llm = OpenAI()  # reads OPENAI_API_KEY
 
 
@@ -207,7 +233,7 @@ def tag_with_openai(image_bytes: bytes, media_type: str) -> dict:
         response_format={"type": "json_schema", "json_schema": {
             "name": "tags", "schema": TAG_SCHEMA, "strict": True,
         }},
-        reasoning_effort="low",  # GPT-5 models don't take temperature
+        **MODEL_SETTINGS,
     )
     return json.loads(resp.choices[0].message.content)
 
@@ -234,6 +260,10 @@ def validate(tags: dict) -> dict:
         names = [str(c.get("color")).lower() for c in tags.get("colors") or [] if isinstance(c, dict)]
         clean["color"] = "multicolor"
         clean["colors"] = list(dict.fromkeys(n for n in names if n in MULTI_COLORS))[:4] or None
+    if clean["category"] == "footwear":
+        clean["pattern"] = "none"  # footwear has no pattern, like bottoms have no sleeve
+    if clean["subcategory"] == "polos":
+        clean["formality"] = "smart casual"  # all polos, incl. rugby shirts
     return clean
 
 
@@ -293,10 +323,11 @@ def color_from_shares(raw, pattern=None) -> tuple[str | None, list[str] | None]:
 #    Table:  CREATE EXTENSION vector;
 #            CREATE TABLE items (id uuid PRIMARY KEY, image_path text,
 #              original_filename text, category text, subcategory text, color text,
-#              colors text, pattern text, formality text, sleeve text,
+#              colors text, pattern text, formality text, sleeve text, shade text,
 #              clip_vec vector(512));
 #    Existing table:  ALTER TABLE items ADD COLUMN colors text;
 #                     ALTER TABLE items ADD COLUMN sleeve text;
+#                     ALTER TABLE items ADD COLUMN shade text;
 # ---------------------------------------------------------------------------
 def save_item(item_id, image_path, original_filename, tags, vector):
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
@@ -304,12 +335,12 @@ def save_item(item_id, image_path, original_filename, tags, vector):
         conn.execute(
             psycopg.sql.SQL(
                 """INSERT INTO {} (id, image_path, original_filename, category,
-                                  subcategory, color, colors, pattern, formality, sleeve, clip_vec)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+                                  subcategory, color, colors, pattern, formality, sleeve, shade, clip_vec)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
             ).format(psycopg.sql.Identifier(ITEMS_TABLE)),
             (item_id, image_path, original_filename, tags["category"], tags["subcategory"],
-             tags["color"], ", ".join(tags["colors"]) if tags["colors"] else None,
-             tags["pattern"], tags["formality"], tags["sleeve"], vector),
+             tags["color"], ", ".join(tags["colors"]) if tags["colors"] else "none",
+             tags["pattern"], tags["formality"], tags["sleeve"], tags["shade"], vector),
         )
 
 
