@@ -38,6 +38,11 @@ from what you actually wear.
 Needs macOS, Python 3.14, PostgreSQL with the `pgvector` extension, Xcode Command Line
 Tools (to build the background-removal helper), and an OpenAI API key.
 
+> **Why macOS?** Background removal on upload uses Apple's Vision framework, which only
+> runs on macOS. Everything else (outfits, wardrobe, feedback, history) is plain Python
+> and works on any system. To host the app in the cloud, a Linux background-removal model
+> such as BiRefNet would replace it.
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
