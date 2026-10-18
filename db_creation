@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- One row per clothing item, written by tagging_worker_4.py (13 columns).
+-- One row per clothing item, written by tagging_worker.py (13 columns).
 CREATE TABLE IF NOT EXISTS items (
   id uuid PRIMARY KEY,
   image_path text,
@@ -27,10 +27,10 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS available boolean NOT NULL DEFAULT tr
 
 -- Re-run the CREATE OR REPLACE VIEW below after adding a column: a SELECT * view
 -- keeps the column list it had when it was created.
--- view_items_2 is the read view gpt_outfit_engine.py queries by default (ITEMS_TABLE).
--- It must stay a VIEW, not a table: tagging_worker_4.py only ever writes to `items`,
+-- view_items is the read view outfit_engine.py queries by default (ITEMS_TABLE).
+-- It must stay a VIEW, not a table: tagging_worker.py only ever writes to `items`,
 -- so a separate table here would silently go stale.
-CREATE OR REPLACE VIEW view_items_2 AS SELECT * FROM items;
+CREATE OR REPLACE VIEW view_items AS SELECT * FROM items;
 
 -- Feedback loop (add_feedback.sql): your thumbs up/down on outfits (per occasion, with an
 -- optional reason) and the outfits you wore. The outfit engine reads both.

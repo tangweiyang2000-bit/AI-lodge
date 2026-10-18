@@ -2,7 +2,7 @@
 Outfit engine for the wardrobe app.
 
 Turns a request like "dinner date tonight, we'll walk around outside" into
-2-3 outfits built only from items already tagged by tagging_worker_4.py.
+2-3 outfits built only from items already tagged by tagging_worker.py.
 
   1. Parse   - GPT turns the request into tag filters + a style description
   2. Retrieve - Postgres filters by tags, then CLIP ranks items by similarity
@@ -10,18 +10,18 @@ Turns a request like "dinner date tonight, we'll walk around outside" into
   3. Generate - GPT picks items from the shortlist and builds outfits
   4. Validate - code checks every item exists and each outfit is complete
 
-It reuses ALLOWED and CLIP from tagging_worker_4.py so the tag lists live in
+It reuses ALLOWED and CLIP from tagging_worker.py so the tag lists live in
 one place, but calls GPT (OpenAI) for the parsing/generation steps.
-Put this file next to tagging_worker_4.py.
+Put this file next to tagging_worker.py.
 
-Reads items from the view_items_2 table (see view_items_2.sql).
+Reads items from the view_items table (see view_items.sql).
 
 Env vars:
   OPENAI_API_KEY   - for the LLM
   OPENAI_MODEL     - optional, any GPT model (default below)
 
 Run the server (serves BOTH /items and /outfits):
-  uvicorn gpt_outfit_engine:app --reload   (then open http://127.0.0.1:8000/)
+  uvicorn outfit_engine:app --reload   (then open http://127.0.0.1:8000/)
 
 Or try it from the terminal:
   python outfit_engine.py "dinner date tonight, walking around outside"
@@ -41,13 +41,13 @@ from pgvector.psycopg import register_vector
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from tagging_worker_4 import ALLOWED, _as_tensor, app, load_clip
+from tagging_worker import ALLOWED, _as_tensor, app, load_clip
 
 llm = OpenAI()  # reads OPENAI_API_KEY
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 # Which table/view to read items from.
-ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "view_items_2")
+ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "view_items")
 FEEDBACK_TABLE = os.environ.get("FEEDBACK_TABLE", "outfit_feedback")   # add_feedback.sql
 WEARS_TABLE = os.environ.get("WEARS_TABLE", "outfit_wears")
 

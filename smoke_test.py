@@ -1,6 +1,6 @@
 """Smoke test: checks the running app end to end, from the outside, like the website does.
 
-Start the server first (uvicorn gpt_outfit_engine:app --reload), then in another terminal:
+Start the server first (uvicorn outfit_engine:app --reload), then in another terminal:
     python smoke_test.py            # read-only checks (nothing is changed)
     python smoke_test.py --write    # also saves a 👍 and an "I wore this", then removes them again
 
@@ -57,7 +57,7 @@ def items():
     assert data, "no items in the wardrobe"
     state["items"] = data
     untagged = [i["original_filename"] for i in data if not (i["category"] and i["color"])]
-    assert "last_worn" in data[0], "last_worn missing (old tagging_worker_4.py?)"
+    assert "last_worn" in data[0], "last_worn missing (old tagging_worker.py?)"
     away = sum(1 for i in data if not i["available"])
     return f"{len(data)} items, {away} in the laundry" + (f", {len(untagged)} need tags: {untagged[:3]}" if untagged else "")
 
@@ -124,7 +124,7 @@ def feedback_round_trip():
 
 print(f"Checking {BASE} ...\n")
 if not check("Website pages load", website):
-    print("\nIs the server running?  uvicorn gpt_outfit_engine:app --reload")
+    print("\nIs the server running?  uvicorn outfit_engine:app --reload")
     sys.exit(1)
 if check("Items list (GET /items)", items):
     check("One item (GET /items/{id})", one_item)

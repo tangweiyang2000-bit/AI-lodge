@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS items_backup_before_available AS TABLE items;
 ALTER TABLE items ADD COLUMN IF NOT EXISTS available boolean NOT NULL DEFAULT true;
 
 -- 3. Rebuild the view so it includes the new column
-CREATE OR REPLACE VIEW view_items_2 AS SELECT * FROM items;
+CREATE OR REPLACE VIEW view_items AS SELECT * FROM items;
 
 -- Check: should show one row, true | 60
-SELECT available, COUNT(*) FROM view_items_2 GROUP BY available;
+SELECT available, COUNT(*) FROM view_items GROUP BY available;

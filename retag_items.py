@@ -1,4 +1,4 @@
-"""Re-tag every row already in ITEMS_TABLE with the current tagger in tagging_worker_4.py
+"""Re-tag every row already in ITEMS_TABLE with the current tagger in tagging_worker.py
 (same model, prompt, guides and validate() rules as a new upload).
 
 Only the tag columns are updated; id, image_path, original_filename and clip_vec stay as they are.
@@ -14,7 +14,7 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 
-import tagging_worker_4 as tw
+import tagging_worker as tw
 
 HERE = Path(__file__).resolve().parent
 WORKERS = 8

@@ -167,7 +167,7 @@ TAG_SCHEMA = {
 
 # ---------------------------------------------------------------------------
 # 2. Load CLIP once when the server starts (not on every upload).
-#    gpt_outfit_engine.py embeds its search text with this same model
+#    outfit_engine.py embeds its search text with this same model
 #    (load_clip) and compares it against the vectors stored here.
 # ---------------------------------------------------------------------------
 CLIP_NAME = "patrickjohncyh/fashion-clip"
@@ -719,7 +719,7 @@ def similar_items(item_id: uuid.UUID, n: int = 3):
 
 # ---------------------------------------------------------------------------
 # 8. Tag an image that is already on disk, without copying it to uploads/:
-#      python tagging_worker_4.py birefnet_generate/birefnet_1_white_plain_tee.png
+#      python tagging_worker.py birefnet_generate/birefnet_1_white_plain_tee.png
 #    The path you pass is stored in the database as-is.
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

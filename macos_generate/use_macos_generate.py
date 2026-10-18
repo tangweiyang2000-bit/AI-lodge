@@ -215,7 +215,7 @@ def prepare_tools() -> None:
 def make_cutout(image_path: str) -> Image.Image:
     """The full pipeline for one photo: remove the background, crop to the garment,
     upscale small photos, and centre it on the transparent 1024x1536 canvas.
-    Used by this script (batch) and by the upload endpoint in tagging_worker_4.py."""
+    Used by this script (batch) and by the upload endpoint in tagging_worker.py."""
     prepare_tools()
     result = crop_to_content(cut_out(image_path))
     try:

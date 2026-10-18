@@ -20,8 +20,8 @@ I'm new to machine learning and still learning Python. When working with me:
 | PRD phase | Status |
 |---|---|
 | 1. Manual bootstrap | Done (superseded by auto-tagging) |
-| 2. Outfit engine | Done: `gpt_outfit_engine.py` (always aims for 3 outfits, swap one piece) |
-| 3. Auto-tagging | Done: `tagging_worker_4.py`, 60 items tagged |
+| 2. Outfit engine | Done: `outfit_engine.py` (always aims for 3 outfits, swap one piece) |
+| 3. Auto-tagging | Done: `tagging_worker.py`, 60 items tagged |
 | 4. Real UI | Done: website in `web/` (Today, Wardrobe, Item, Add an item, History) |
 | 5. Feedback & polish | Done: 👍/👎 with reasons, "I wore this", laundry, history, not-worn-lately |
 
@@ -41,7 +41,7 @@ Photo(s) ──► Add an item page ──► POST /items ──► tagging_work
                                   uploads/pending/<id>.json   (waits for your check)
                                                    │ "Add to wardrobe" = POST /items/{id}/confirm
                                                    ▼
-                                           Postgres `items` table (read via view_items_2)
+                                           Postgres `items` table (read via view_items)
                                                    │
 Request ──► Today page ──► POST /outfits ──► 1. Parse: GPT turns the request into filters
                                              2. Retrieve: SQL filters, CLIP ranks per slot
@@ -72,12 +72,12 @@ Request ──► Today page ──► POST /outfits ──► 1. Parse: GPT tur
 - **Each item is tagged once and stored.** Re-tag only deliberately with `retag_items.py`.
 - **Uploads are held until you confirm.** Website uploads go to `uploads/pending/` and
   only enter `items` (and the outfits) when you press Add to wardrobe. The CLI
-  (`python tagging_worker_4.py <photo>`) still saves straight away.
+  (`python tagging_worker.py <photo>`) still saves straight away.
 - **The name you type is stored as `original_filename`** (with the photo's extension),
   because that's what the website and outfit engine show as the item's name.
 - **Outfit engine: GPT-4o mini** for parsing and generation, with Postgres + CLIP
   retrieval in between so GPT only sees a shortlist (`PER_CATEGORY = 6` per slot).
-- **Feedback rules** (`judge()` in `gpt_outfit_engine.py`):
+- **Feedback rules** (`judge()` in `outfit_engine.py`):
   - 👎 "colours clash" / "don't like a piece" → that outfit never comes back.
   - Any other 👎 (too formal, too casual, not for this occasion, no reason) → blocked
     only for the same occasion (its formality level), e.g. fine for brunch, not the gym.
@@ -96,7 +96,7 @@ Request ──► Today page ──► POST /outfits ──► 1. Parse: GPT tur
 
 ## Conventions
 
-### Tag values (`ALLOWED` in `tagging_worker_4.py`, the single source)
+### Tag values (`ALLOWED` in `tagging_worker.py`, the single source)
 | Tag | Values |
 |---|---|
 | category | top, bottom, footwear |
@@ -107,7 +107,7 @@ Request ──► Today page ──► POST /outfits ──► 1. Parse: GPT tur
 | sleeve | short, long, none |
 | shade | light, dark |
 
-`gpt_outfit_engine.py` imports `ALLOWED`. Never copy the lists elsewhere.
+`outfit_engine.py` imports `ALLOWED`. Never copy the lists elsewhere.
 
 ### Rules set by code in `validate()`
 - Shoes or sandals → category footwear; footwear → pattern `none`.
@@ -132,7 +132,7 @@ named `macos_<n>_<colour>_<description>.png`. Website uploads live in `uploads/`
 
 PostgreSQL `wardrobe` on localhost with pgvector. Full schema in `db_creation`.
 
-**`items`** (one row per clothing item; read through the view `view_items_2`)
+**`items`** (one row per clothing item; read through the view `view_items`)
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid PK | |
@@ -149,10 +149,10 @@ vote (1 / -1), reason, request, title, voted_at, last_shown.
 
 ## Rules that must not be broken
 
-- **`view_items_2` must stay a VIEW**, never a table. Re-run
-  `CREATE OR REPLACE VIEW view_items_2 AS SELECT * FROM items;` after adding a column.
+- **`view_items` must stay a VIEW**, never a table. Re-run
+  `CREATE OR REPLACE VIEW view_items AS SELECT * FROM items;` after adding a column.
 - **A schema change touches:** `db_creation`, the INSERT in `save_item()`,
-  `ITEM_FIELDS` in `tagging_worker_4.py`, and `retag_items.py`'s `TAG_COLUMNS`.
+  `ITEM_FIELDS` in `tagging_worker.py`, and `retag_items.py`'s `TAG_COLUMNS`.
 - **Image and search vectors must use the same CLIP model.** Changing `CLIP_NAME` means
   re-embedding every item.
 - **Back up before re-tagging:** `CREATE TABLE items_backup AS TABLE items;` then
@@ -167,18 +167,18 @@ vote (1 / -1), reason, request, title, voted_at, last_shown.
 
 | File | Purpose |
 |---|---|
-| `tagging_worker_4.py` | Tagger + FastAPI app. Item endpoints: `POST /items` (upload, held for review), `GET /items`, `GET/PATCH/DELETE /items/{id}`, `POST /items/{id}/confirm`, `GET /allowed`. Defines `ALLOWED`, the prompt, schema and `validate()`. |
-| `gpt_outfit_engine.py` | Outfit engine on the same app: `POST /outfits`, `POST /outfits/swap`, `POST /feedback`, `POST /wears`, `GET /history`, `GET /feedback`, `GET /thumb/<path>`; serves the website at `/`. Also a CLI. |
+| `tagging_worker.py` | Tagger + FastAPI app. Item endpoints: `POST /items` (upload, held for review), `GET /items`, `GET/PATCH/DELETE /items/{id}`, `POST /items/{id}/confirm`, `GET /allowed`. Defines `ALLOWED`, the prompt, schema and `validate()`. |
+| `outfit_engine.py` | Outfit engine on the same app: `POST /outfits`, `POST /outfits/swap`, `POST /feedback`, `POST /wears`, `GET /history`, `GET /feedback`, `GET /thumb/<path>`; serves the website at `/`. Also a CLI. |
 | `web/` | The website: `index.html` (Today), `wardrobe.html`, `item.html`, `add.html`, `history.html`, `style.css`, `common.js`, `gsap.min.js` (animations). |
 | `macos_generate/use_macos_generate.py` | Background removal (`make_cutout`), also run in batch on its own. |
 | `birefnet_generate/use_birefnet_generate.py` | Alternative cut-out pipeline (rembg + BiRefNet) that also runs on Linux; not used by the app today. Downloads its model on first run. |
 | `retag_items.py` | Re-tags every row with the current tagger (tag columns only). |
 | `smoke_test.py` | Checks a running server end to end (read-only by default). |
-| `db_creation` | Full schema: `items`, `view_items_2`, `outfit_feedback`, `outfit_wears`. |
+| `db_creation` | Full schema: `items`, `view_items`, `outfit_feedback`, `outfit_wears`. |
 | `add_available.sql`, `add_feedback.sql` | One-off migrations (already applied / to apply once). |
-| `view_items_2.sql` | Inspection query over the view. |
+| `view_items.sql` | Inspection query over the view. |
 | `outfits.html` | Preview of the last outfits, rewritten on every request (git-ignored). |
-| `test_images/`, `test_images_women/` | Raw source photos. |
+| `test_images/` | Raw source photos. |
 
 This folder is a git worktree of the `AI wardobe-data-prep-v1` repository, branch
 `data-prep-v2`.
@@ -189,7 +189,7 @@ This folder is a git worktree of the `AI wardobe-data-prep-v1` repository, branc
 source .venv/bin/activate
 
 # the app (website + API); --host lets your phone on the same Wi-Fi open it
-uvicorn gpt_outfit_engine:app --reload --host 0.0.0.0
+uvicorn outfit_engine:app --reload --host 0.0.0.0
 #   Mac:   http://127.0.0.1:8000/
 #   phone: http://<ipconfig getifaddr en0>:8000
 
@@ -197,10 +197,10 @@ uvicorn gpt_outfit_engine:app --reload --host 0.0.0.0
 python smoke_test.py
 
 # outfits from the terminal (opens outfits.html)
-python gpt_outfit_engine.py "dinner date tonight, walking around outside"
+python outfit_engine.py "dinner date tonight, walking around outside"
 
 # tag one image already on disk (saved straight to the wardrobe)
-python tagging_worker_4.py macos_generate/macos_1_white_plain_tee.png
+python tagging_worker.py macos_generate/macos_1_white_plain_tee.png
 
 # re-tag the whole table (back it up first)
 python retag_items.py
