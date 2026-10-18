@@ -1,4 +1,4 @@
-# Vesti
+# Shuffle
 
 **An AI outfit recommender for your own wardrobe.**
 
