@@ -7,12 +7,19 @@ Start the server first (uvicorn outfit_engine:app --reload), then in another ter
 It asks for outfits and a swap, so it makes a few OpenAI calls (a few cents at most).
 Every check prints PASS or FAIL with a short reason; the last line is the total.
 """
+import base64
 import json
 import sys
 import urllib.error
 import urllib.request
 
 BASE = "http://127.0.0.1:8000"
+try:                                    # if the app has a password (APP_PASSWORD in .env), send it
+    from dotenv import dotenv_values
+    _password = dotenv_values(".env").get("APP_PASSWORD") or ""
+except ImportError:
+    _password = ""
+AUTH = {"Authorization": "Basic " + base64.b64encode(f"me:{_password}".encode()).decode()} if _password else {}
 WRITE = "--write" in sys.argv
 results = []
 
@@ -20,7 +27,7 @@ results = []
 def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json"} if data else {})
+                                 headers={**AUTH, **({"Content-Type": "application/json"} if data else {})})
     with urllib.request.urlopen(req, timeout=120) as res:
         raw = res.read()
         return res.status, (json.loads(raw) if res.headers.get_content_type() == "application/json" else raw)

@@ -1040,6 +1040,33 @@ class FreshStaticFiles(StaticFiles):
         return response
 
 
+# Optional password, for when the app is reachable from the internet (e.g. a Cloudflare tunnel).
+# Set APP_PASSWORD=... in .env: the browser then asks once (any username, this password).
+# Leave it unset and the app works without a password, as on your home Wi-Fi.
+import base64
+import secrets
+from fastapi import Request
+from fastapi.responses import Response
+
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    if APP_PASSWORD:
+        given = ""
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("basic "):
+            try:
+                given = base64.b64decode(auth[6:]).decode().split(":", 1)[1]
+            except Exception:  # noqa: BLE001 - a malformed header just counts as no password
+                given = ""
+        if not secrets.compare_digest(given.encode(), APP_PASSWORD.encode()):
+            return Response("Password needed", status_code=401,
+                            headers={"WWW-Authenticate": 'Basic realm="Wardrobe"'})
+    return await call_next(request)
+
+
 app.mount("/app", FreshStaticFiles(directory=os.path.join(PROJECT_DIR, "web"), html=True), name="web")
 app.mount("/macos_generate", StaticFiles(directory=os.path.join(PROJECT_DIR, "macos_generate")),
           name="macos_generate")
