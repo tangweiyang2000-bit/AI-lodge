@@ -130,7 +130,7 @@ named `macos_<n>_<colour>_<description>.png`. Website uploads live in `uploads/`
 
 ## Database
 
-PostgreSQL `wardrobe` on localhost with pgvector. Full schema in `db_creation`.
+PostgreSQL `wardrobe` on localhost with pgvector. Full schema in `sql/schema.sql`.
 
 **`items`** (one row per clothing item; read through the view `view_items`)
 | Column | Type | Notes |
@@ -142,16 +142,16 @@ PostgreSQL `wardrobe` on localhost with pgvector. Full schema in `db_creation`.
 | clip_vec | vector(512) | FashionCLIP (`patrickjohncyh/fashion-clip`) image embedding |
 | available | boolean | false = in the laundry; outfits skip it |
 
-**`outfit_feedback`** (`add_feedback.sql`): PK (outfit_key, occasion); item_ids uuid[],
+**`outfit_feedback`** (`sql/add_feedback.sql`): PK (outfit_key, occasion); item_ids uuid[],
 vote (1 / -1), reason, request, title, voted_at, last_shown.
-**`outfit_wears`** (`add_feedback.sql`): PK (outfit_key, worn_on date); item_ids, request, title.
+**`outfit_wears`** (`sql/add_feedback.sql`): PK (outfit_key, worn_on date); item_ids, request, title.
 `outfit_key` = the outfit's item ids sorted and joined with commas.
 
 ## Rules that must not be broken
 
 - **`view_items` must stay a VIEW**, never a table. Re-run
   `CREATE OR REPLACE VIEW view_items AS SELECT * FROM items;` after adding a column.
-- **A schema change touches:** `db_creation`, the INSERT in `save_item()`,
+- **A schema change touches:** `sql/schema.sql`, the INSERT in `save_item()`,
   `ITEM_FIELDS` in `tagging_worker.py`, and `retag_items.py`'s `TAG_COLUMNS`.
 - **Image and search vectors must use the same CLIP model.** Changing `CLIP_NAME` means
   re-embedding every item.
@@ -168,15 +168,16 @@ vote (1 / -1), reason, request, title, voted_at, last_shown.
 | File | Purpose |
 |---|---|
 | `tagging_worker.py` | Tagger + FastAPI app. Item endpoints: `POST /items` (upload, held for review), `GET /items`, `GET/PATCH/DELETE /items/{id}`, `POST /items/{id}/confirm`, `GET /allowed`. Defines `ALLOWED`, the prompt, schema and `validate()`. |
+| `README.md` | Public overview for people on GitHub (layout, setup). |
 | `outfit_engine.py` | Outfit engine on the same app: `POST /outfits`, `POST /outfits/swap`, `POST /feedback`, `POST /wears`, `GET /history`, `GET /feedback`, `GET /thumb/<path>`; serves the website at `/`. Also a CLI. |
 | `web/` | The website: `index.html` (Today), `wardrobe.html`, `item.html`, `add.html`, `history.html`, `style.css`, `common.js`, `gsap.min.js` (animations). |
 | `macos_generate/use_macos_generate.py` | Background removal (`make_cutout`), also run in batch on its own. |
 | `birefnet_generate/use_birefnet_generate.py` | Alternative cut-out pipeline (rembg + BiRefNet) that also runs on Linux; not used by the app today. Downloads its model on first run. |
 | `retag_items.py` | Re-tags every row with the current tagger (tag columns only). |
 | `smoke_test.py` | Checks a running server end to end (read-only by default). |
-| `db_creation` | Full schema: `items`, `view_items`, `outfit_feedback`, `outfit_wears`. |
-| `add_available.sql`, `add_feedback.sql` | One-off migrations (already applied / to apply once). |
-| `view_items.sql` | Inspection query over the view. |
+| `sql/schema.sql` | Full schema: `items`, `view_items`, `outfit_feedback`, `outfit_wears`. |
+| `sql/add_available.sql`, `sql/add_feedback.sql` | One-off migrations (already applied / to apply once). |
+| `sql/view_items.sql` | Inspection query over the view. |
 | `outfits.html` | Preview of the last outfits, rewritten on every request (git-ignored). |
 | `test_images/` | Raw source photos. |
 
@@ -206,7 +207,7 @@ python tagging_worker.py macos_generate/macos_1_white_plain_tee.png
 python retag_items.py
 
 # database migrations (psql needs the database name; $DATABASE_URL is only in .env)
-psql -d wardrobe -f add_feedback.sql
+psql -d wardrobe -f sql/add_feedback.sql
 ```
 
 ### Environment (`.env`)

@@ -32,7 +32,7 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS available boolean NOT NULL DEFAULT tr
 -- so a separate table here would silently go stale.
 CREATE OR REPLACE VIEW view_items AS SELECT * FROM items;
 
--- Feedback loop (add_feedback.sql): your thumbs up/down on outfits (per occasion, with an
+-- Feedback loop (sql/add_feedback.sql): your thumbs up/down on outfits (per occasion, with an
 -- optional reason) and the outfits you wore. The outfit engine reads both.
 CREATE TABLE IF NOT EXISTS outfit_feedback (
   outfit_key text NOT NULL,                -- sorted item ids joined with ','

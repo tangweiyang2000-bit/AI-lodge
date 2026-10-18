@@ -546,7 +546,7 @@ def select_items(where: str = "", params: tuple = ()) -> list[dict]:
         return [item_from_row(r) for r in conn.execute(query, params).fetchall()]
 
 
-WEARS_TABLE = os.environ.get("WEARS_TABLE", "outfit_wears")   # "I wore this" (add_feedback.sql)
+WEARS_TABLE = os.environ.get("WEARS_TABLE", "outfit_wears")   # "I wore this" (sql/add_feedback.sql)
 
 
 def with_last_worn(items: list[dict]) -> list[dict]:
@@ -558,7 +558,7 @@ def with_last_worn(items: list[dict]) -> list[dict]:
                 "SELECT item_id, max(worn_on) FROM {}, unnest(item_ids) AS item_id GROUP BY item_id")
                 .format(psycopg.sql.Identifier(WEARS_TABLE))).fetchall()}
     except psycopg.errors.UndefinedTable:
-        pass   # add_feedback.sql not run yet: nothing has been worn
+        pass   # sql/add_feedback.sql not run yet: nothing has been worn
     for item in items:
         item["last_worn"] = worn.get(item["id"])
     return items

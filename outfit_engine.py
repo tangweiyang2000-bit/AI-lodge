@@ -14,7 +14,7 @@ It reuses ALLOWED and CLIP from tagging_worker.py so the tag lists live in
 one place, but calls GPT (OpenAI) for the parsing/generation steps.
 Put this file next to tagging_worker.py.
 
-Reads items from the view_items table (see view_items.sql).
+Reads items from the view_items table (see sql/view_items.sql).
 
 Env vars:
   OPENAI_API_KEY   - for the LLM
@@ -48,7 +48,7 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 # Which table/view to read items from.
 ITEMS_TABLE = os.environ.get("ITEMS_TABLE", "view_items")
-FEEDBACK_TABLE = os.environ.get("FEEDBACK_TABLE", "outfit_feedback")   # add_feedback.sql
+FEEDBACK_TABLE = os.environ.get("FEEDBACK_TABLE", "outfit_feedback")   # sql/add_feedback.sql
 WEARS_TABLE = os.environ.get("WEARS_TABLE", "outfit_wears")
 
 # How many candidates to shortlist per category before GPT chooses.
@@ -326,7 +326,7 @@ def describe(short_id: str, item: dict) -> str:
 
 # ---------------------------------------------------------------------------
 # The feedback loop: your 👍 / 👎 (with an optional reason) and "I wore this" from the
-# Today page, in the tables from add_feedback.sql. The rules:
+# Today page, in the tables from sql/add_feedback.sql. The rules:
 #  - 👎 with "colours clash" / "don't like a piece": that outfit never comes back.
 #  - any other 👎 (too formal, too casual, wrong occasion, no reason): it doesn't come
 #    back for occasions at the same dress level, but can for others.
@@ -350,7 +350,7 @@ def occasion_of(formality) -> str:
 
 
 def load_feedback() -> dict:
-    """Everything the engine has learned. Missing tables (add_feedback.sql not run) = nothing yet."""
+    """Everything the engine has learned. Missing tables (sql/add_feedback.sql not run) = nothing yet."""
     learned = {"votes": [], "worn_recently": {}, "recent_pieces": set()}
     try:
         with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
@@ -875,7 +875,7 @@ def need_tables(run):
     try:
         return run()
     except psycopg.errors.UndefinedTable:
-        raise HTTPException(503, "The feedback tables don't exist yet: run add_feedback.sql")
+        raise HTTPException(503, "The feedback tables don't exist yet: run sql/add_feedback.sql")
 
 
 DOWN_REASONS = ("colours clash", "don't like a piece", "too formal", "too casual", "not for this occasion")

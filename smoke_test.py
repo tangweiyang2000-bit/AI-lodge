@@ -137,4 +137,4 @@ if check("Outfits (POST /outfits, uses OpenAI)", outfits):
         check("Feedback round trip (--write)", feedback_round_trip)
 print(f"\n{sum(results)} of {len(results)} checks passed.")
 if not all(results):
-    print("If 'Feedback tables' failed: run  psql -d wardrobe -f add_feedback.sql")
+    print("If 'Feedback tables' failed: run  psql -d wardrobe -f sql/add_feedback.sql")
