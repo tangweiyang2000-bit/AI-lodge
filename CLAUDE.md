@@ -88,8 +88,9 @@ Request ──► Today page ──► POST /outfits ──► 1. Parse: GPT tur
   jackets can also fill the outerwear slot (`DUAL_SLOT_SUBCATEGORIES`).
 - **Background removal: macOS Vision** (`macos_generate/`), plus Real-ESRGAN 4x
   upscaling for small photos, onto a transparent 1024×1536 canvas. macOS-only, so
-  `birefnet_generate/use_birefnet_generate.py` (rembg + BiRefNet, runs on Linux) is kept
-  as the option if the app moves to a cloud server.
+  `birefnet_generate/use_birefnet_generate.py` (rembg + BiRefNet, runs on Linux) was the
+  option if the app moves to a cloud server; deleted, recover it with
+  `git checkout e6bda19 -- birefnet_generate`.
 - **Thumbnails:** grids use `/thumb/<path>` (400px WebP, made on first request, cached in
   `thumbs/`); the outfit board and item page use the full photo.
 - **Pretrained models only, no custom training** (PRD non-goal for v1).
@@ -173,7 +174,6 @@ vote (1 / -1), reason, request, title, voted_at, last_shown.
 | `outfit_engine.py` | Outfit engine on the same app: `POST /outfits`, `POST /outfits/swap`, `POST /feedback`, `POST /wears`, `GET /history`, `GET /feedback`, `GET /thumb/<path>`; serves the website at `/`. Also a CLI. |
 | `web/` | The website: `index.html` (Today), `wardrobe.html`, `item.html`, `add.html`, `history.html`, `style.css`, `common.js`, `gsap.min.js` (animations). |
 | `macos_generate/use_macos_generate.py` | Background removal (`make_cutout`), also run in batch on its own. |
-| `birefnet_generate/use_birefnet_generate.py` | Alternative cut-out pipeline (rembg + BiRefNet) that also runs on Linux; not used by the app today. Downloads its model on first run. |
 | `retag_items.py` | Re-tags every row with the current tagger (tag columns only). |
 | `smoke_test.py` | Checks a running server end to end (read-only by default). |
 | `sql/schema.sql` | Full schema: `items`, `view_items`, `outfit_feedback`, `outfit_wears`. |
