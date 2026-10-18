@@ -34,13 +34,12 @@ from what you actually wear.
 
 ## Running it
 
-Needs macOS, Python 3, PostgreSQL with the `pgvector` extension, Xcode Command Line
+Needs macOS, Python 3.14, PostgreSQL with the `pgvector` extension, Xcode Command Line
 Tools (to build the background-removal helper), and an OpenAI API key.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install fastapi uvicorn python-multipart python-dotenv openai "psycopg[binary]" \
-    pgvector pydantic pillow numpy torch transformers
+pip install -r requirements.txt
 
 createdb wardrobe
 psql -d wardrobe -f sql/schema.sql

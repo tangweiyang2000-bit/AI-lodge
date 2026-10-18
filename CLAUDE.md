@@ -169,6 +169,7 @@ vote (1 / -1), reason, request, title, voted_at, last_shown.
 |---|---|
 | `tagging_worker.py` | Tagger + FastAPI app. Item endpoints: `POST /items` (upload, held for review), `GET /items`, `GET/PATCH/DELETE /items/{id}`, `POST /items/{id}/confirm`, `GET /allowed`. Defines `ALLOWED`, the prompt, schema and `validate()`. |
 | `README.md` | Public overview for people on GitHub (layout, setup). |
+| `requirements.txt` | Python packages the app uses, pinned (`pip install -r requirements.txt`). |
 | `outfit_engine.py` | Outfit engine on the same app: `POST /outfits`, `POST /outfits/swap`, `POST /feedback`, `POST /wears`, `GET /history`, `GET /feedback`, `GET /thumb/<path>`; serves the website at `/`. Also a CLI. |
 | `web/` | The website: `index.html` (Today), `wardrobe.html`, `item.html`, `add.html`, `history.html`, `style.css`, `common.js`, `gsap.min.js` (animations). |
 | `macos_generate/use_macos_generate.py` | Background removal (`make_cutout`), also run in batch on its own. |
