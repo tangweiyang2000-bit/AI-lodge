@@ -280,18 +280,29 @@ def fetch_candidates(constraints: dict) -> list[dict]:
 
             # Tag filters first. Items with a missing (None) tag are let through.
             # Unavailable items (in the laundry) are never suggested.
-            rows = conn.execute(
-                psycopg.sql.SQL(
-                    f"""SELECT {ITEM_COLUMNS} FROM {{}}
-                        WHERE (category = %s OR subcategory = ANY(%s::text[]))
-                          AND available
-                          AND (formality IS NULL OR formality = ANY(%s)){{}}
-                        ORDER BY clip_vec <=> %s::vector
-                        LIMIT %s"""
-                ).format(table, active_filter),
-                (slot, extra_subcats, constraints["formality"],
-                 query_vec, PER_CATEGORY),
-            ).fetchall()
+            def shortlist(extra_filter: str, limit: int) -> list:
+                return conn.execute(
+                    psycopg.sql.SQL(
+                        f"""SELECT {ITEM_COLUMNS} FROM {{}}
+                            WHERE (category = %s OR subcategory = ANY(%s::text[]))
+                              AND available
+                              AND (formality IS NULL OR formality = ANY(%s)){{}}{extra_filter}
+                            ORDER BY clip_vec <=> %s::vector
+                            LIMIT %s"""
+                    ).format(table, active_filter),
+                    (slot, extra_subcats, constraints["formality"],
+                     query_vec, limit),
+                ).fetchall()
+
+            # Tops when it isn't cold: CLIP alone can fill every place with hoodies
+            # and sweatshirts, so keep half the places for short-sleeve tops (the
+            # best long-sleeve tops fill the rest). Cold and active requests are
+            # left as they are (they have their own sleeve rules).
+            if slot == "top" and not constraints.get("needs_warm_layer") and not active:
+                rows = shortlist(" AND sleeve = 'short'", PER_CATEGORY // 2)
+                rows += shortlist(" AND COALESCE(sleeve, '') <> 'short'", PER_CATEGORY - len(rows))
+            else:
+                rows = shortlist("", PER_CATEGORY)
             fits = True
 
             # Small wardrobes often have nothing that passes the filters in some

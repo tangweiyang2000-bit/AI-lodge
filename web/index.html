@@ -6,7 +6,7 @@
 <title>Today — Shuffle</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="style.css?v=31">
+<link rel="stylesheet" href="style.css?v=32">
 </head>
 <body>
 <header class="site-header">
@@ -30,10 +30,10 @@
     <div style="display: flex; flex-direction: column; gap: 6px">
       <span class="small muted">Or try</span>
       <div style="display: flex; flex-wrap: wrap; gap: 8px" id="ideas">
-        <button type="button" class="chip top">School</button>
+        <button type="button" class="chip peach">Date night</button>
         <button type="button" class="chip bottom">Gym</button>
         <button type="button" class="chip footwear">Mala dinner</button>
-        <button type="button" class="chip peach">Date night</button>
+        <button type="button" class="chip top">School</button>
       </div>
     </div>
     <div class="rail-box" id="railBox" hidden>
@@ -63,7 +63,7 @@
 </main>
 
 <script src="gsap.min.js"></script>
-<script src="common.js?v=31"></script>
+<script src="common.js?v=32"></script>
 <script>
 // Today: send the request to POST /outfits and lay out the outfits flat-lay style.
 // The latest outfits are remembered, so they're still here after you visit another page.
@@ -315,7 +315,6 @@ function renderBoard(mode = "") {
     img.dataset.slot = slot;
     img.item = item;
     img.classList.add("swappable");
-    img.title = `Tap to try a different ${SWAP_WORDS[slot]}`;
     img.addEventListener("click", () => openSwap(slot));
     if (MOTION) gsap.set(img, { rotation: rot });
     else img.style.transform = `rotate(${rot}deg)`;
