@@ -97,12 +97,18 @@ def parse_request(request: str) -> dict:
         'literally refers to (never ones you would pick for the situation) '
         '(e.g. "my air force" means the files containing af1), as file names from '
         f'this wardrobe: {sorted(names)}; [] if none\n\n'
-        "Be generous: include every formality level that could work."
+        "For formality, include every level people would normally wear to this, "
+        "but leave out levels that would look overdressed or underdressed there. "
+        "Everyday plans (school, errands, gym, hanging out) are not business occasions."
     )
+    # temperature 0 + seed: the same request is read the same way every time, so
+    # occasion-based 👎 votes keep matching. GPT-5 models don't accept temperature.
+    repeatable = {} if OPENAI_MODEL.startswith("gpt-5") else {"temperature": 0, "seed": 42}
     resp = llm.chat.completions.create(
         model=OPENAI_MODEL,
         max_tokens=200,
         response_format={"type": "json_object"},
+        **repeatable,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = json.loads(resp.choices[0].message.content)
@@ -113,6 +119,11 @@ def parse_request(request: str) -> dict:
         values = [str(v).lower().strip() for v in raw.get(attribute, [])]
         values = [v for v in values if v in ALLOWED[attribute]]
         constraints[attribute] = values or list(ALLOWED[attribute])
+    # ALLOWED["formality"] runs from least to most formal. If GPT allows two levels,
+    # every level between them fits too (smart casual + formal -> add business casual).
+    scale = ALLOWED["formality"]
+    picked = [scale.index(v) for v in constraints["formality"]]
+    constraints["formality"] = scale[min(picked):max(picked) + 1]
     constraints["search_text"] = str(raw.get("search_text") or request)
     constraints["needs_warm_layer"] = raw.get("needs_warm_layer") is True
     constraints["is_active"] = raw.get("is_active") is True
