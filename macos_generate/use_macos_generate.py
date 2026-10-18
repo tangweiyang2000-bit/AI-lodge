@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import urllib.request
 import zipfile
 
@@ -155,11 +156,14 @@ def ensure_realesrgan() -> None:
     os.chmod(REALESRGAN_BIN, 0o755)
 
 
+_gpu_lock = threading.Lock()   # several uploads at once: only one upscale uses the GPU at a time
+
+
 def super_resolve(img: Image.Image, scale: int = 4) -> Image.Image:
     """4x upscale via Real-ESRGAN (runs as a subprocess; it ships as a binary,
     not a Python package, since its real pip package depends on the
     unmaintained basicsr, which doesn't build on current Python)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with _gpu_lock, tempfile.TemporaryDirectory() as tmp:
         in_path = os.path.join(tmp, "in.png")
         out_path = os.path.join(tmp, "out.png")
         img.save(in_path)
@@ -196,20 +200,42 @@ def light_touch_up(img: Image.Image) -> Image.Image:
     return out
 
 
-def process_one(image_path: str) -> None:
-    try:
-        img = Image.open(image_path)
-    except FileNotFoundError:
-        print(f"Error: Could not find {image_path}, skipping.")
-        return
+_tools_lock = threading.Lock()
 
-    result = cut_out(image_path)
-    result = crop_to_content(result)
-    if ENABLE_SUPER_RES and needs_super_res(img):
+
+def prepare_tools() -> None:
+    """Compile bgremove and download Real-ESRGAN if missing (first run only).
+    Locked so two uploads at the same moment don't both try to set them up."""
+    with _tools_lock:
+        ensure_bgremove()
+        if ENABLE_SUPER_RES:
+            ensure_realesrgan()
+
+
+def make_cutout(image_path: str) -> Image.Image:
+    """The full pipeline for one photo: remove the background, crop to the garment,
+    upscale small photos, and centre it on the transparent 1024x1536 canvas.
+    Used by this script (batch) and by the upload endpoint in tagging_worker_4.py."""
+    prepare_tools()
+    result = crop_to_content(cut_out(image_path))
+    try:
+        source = Image.open(image_path)   # the original photo's size decides upscaling
+    except Exception:
+        source = result                   # e.g. HEIC that PIL can't open: judge by the cut-out
+    if ENABLE_SUPER_RES and needs_super_res(source):
         result = super_resolve(result)
     result = place_on_canvas(result, CANVAS_SIZE, PADDING)
     if ENHANCE:
         result = light_touch_up(result)
+    return result
+
+
+def process_one(image_path: str) -> None:
+    if not os.path.exists(image_path):
+        print(f"Error: Could not find {image_path}, skipping.")
+        return
+
+    result = make_cutout(image_path)
 
     stem = os.path.splitext(os.path.basename(image_path))[0]
     output_name = os.path.join(

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Item — wardrobe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css?v=31">
+</head>
+<body>
+<header class="site-header">
+  <a class="wordmark" href="index.html">wardrobe</a>
+  <nav class="site-nav" aria-label="Main">
+    <a href="index.html">Today</a>
+    <a href="wardrobe.html" aria-current="page">Wardrobe</a>
+    <a href="add.html">Add an item</a>
+    <a href="history.html">History</a>
+  </nav>
+</header>
+
+<main class="layout photo-first">
+  <form class="side" id="tagForm" aria-labelledby="iTitle">
+    <a href="wardrobe.html" class="muted" style="text-decoration: none; font-weight: 500; min-height: 40px; display: inline-flex; align-items: center">← Wardrobe</a>
+    <h1 class="big" id="iTitle" style="font-size: clamp(38px, 5vw, 54px)">Loading…</h1>
+    <div class="tag-grid" id="tagGrid"></div>
+    <div id="coloursBox" hidden>
+      <div class="tag-head"><span style="font-size: 14px; font-weight: 600">Colours in this item</span></div>
+      <div class="colour-boxes" id="colourBoxes"></div>
+    </div>
+    <label class="check" style="font-weight: 500">
+      <input type="checkbox" role="switch" id="available"> Available to wear (untick when it's in the laundry)
+    </label>
+    <p class="small muted" id="lastWorn" style="margin: 0"></p>
+    <div id="status"></div>
+    <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: auto">
+      <button class="btn" type="submit" id="saveBtn">Save changes</button>
+      <button class="btn btn-ghost" type="button" id="undoBtn">Undo my edits</button>
+    </div>
+    <div id="removeBox" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px">
+      <button class="btn btn-ghost" type="button" id="removeBtn">Remove from wardrobe</button>
+    </div>
+  </form>
+
+  <section class="stage" aria-label="Photo">
+    <div class="photo-board" id="photo"></div>
+  </section>
+</main>
+
+<script src="common.js?v=31"></script>
+<script>
+// Item: GET /items/{id}, edit tags with PATCH, laundry switch saves straight away.
+const TAGS = ["category", "subcategory", "color", "pattern", "formality", "sleeve", "shade"];
+const LABELS = { category: "Category", subcategory: "Type", color: "Colour", pattern: "Pattern",
+                 formality: "Formality", sleeve: "Sleeve", shade: "Shade" };
+const id = new URLSearchParams(location.search).get("id");
+
+const form = document.getElementById("tagForm");
+const title = document.getElementById("iTitle");
+const tagGrid = document.getElementById("tagGrid");
+const coloursBox = document.getElementById("coloursBox");
+const colourBoxes = document.getElementById("colourBoxes");
+const available = document.getElementById("available");
+const status = document.getElementById("status");
+const photo = document.getElementById("photo");
+
+let saved = null;     // the item as stored in the database
+let allowed = null;   // allowed values from GET /allowed
+
+function currentTags() {
+  const tags = {};
+  TAGS.forEach((t) => { tags[t] = document.getElementById(`tag-${t}`).value; });
+  tags.colors = [...colourBoxes.querySelectorAll("input:checked")].map((c) => c.value);
+  return tags;
+}
+
+function changes() {
+  const now = currentTags();
+  const diff = {};
+  TAGS.forEach((t) => { if (now[t] !== (saved[t] ?? "")) diff[t] = now[t]; });
+  if (now.color === "multicolor" && now.colors.join() !== (saved.colors || []).join()) diff.colors = now.colors;
+  return diff;
+}
+
+function refresh() {
+  const now = currentTags();
+  TAGS.forEach((t) => {
+    const select = document.getElementById(`tag-${t}`);
+    const edited = now[t] !== (saved[t] ?? "");
+    select.classList.toggle("edited", edited);
+    document.getElementById(`was-${t}`).hidden = !edited;
+  });
+  coloursBox.hidden = now.color !== "multicolor";
+  photo.className = `photo-board ${["top", "bottom", "footwear"].includes(now.category) ? now.category : ""}`;
+}
+
+function buildForm() {
+  tagGrid.replaceChildren(...TAGS.map((t) => {
+    const options = allowed[t].concat(t === "pattern" ? ["none"] : []);
+    const value = saved[t] ?? "";
+    const select = el("select", { class: "field", id: `tag-${t}`, onchange: refresh },
+      value ? null : el("option", { value: "" }, "Needs a tag"),
+      options.map((o) => el("option", { value: o, selected: o === value }, o)));
+    return el("div", {},
+      el("div", { class: "tag-head" },
+        el("label", { for: `tag-${t}` }, LABELS[t]),
+        el("span", { class: "note", id: `was-${t}`, hidden: true }, `was ${value || "empty"}`)),
+      select);
+  }));
+  colourBoxes.replaceChildren(...allowed.multi_colors.map((c) => el("label", { class: "check", style: "min-height: 36px" },
+    el("input", { type: "checkbox", value: c, checked: (saved.colors || []).includes(c), onchange: refresh }), c)));
+  available.checked = saved.available;
+  refresh();
+}
+
+async function load() {
+  if (!id) { title.textContent = "No item chosen"; showMessage(status, "Open an item from your wardrobe.", "error"); return; }
+  try {
+    [saved, allowed] = await Promise.all([api(`/items/${id}`), api("/allowed")]);
+  } catch (err) {
+    title.textContent = "Item not found";
+    showMessage(status, `${err.message}. Go back to your wardrobe and pick it again.`, "error");
+    return;
+  }
+  title.textContent = itemName(saved);
+  document.title = `${itemName(saved)} — wardrobe`;
+  photo.replaceChildren(el("img", { src: imageUrl(saved), alt: itemName(saved) }));
+  if (!saved.pending) document.getElementById("lastWorn").textContent = lastWornText(saved) + ".";
+  buildForm();
+  if (saved.pending) {   // an upload still waiting on the Add item page
+    showMessage(status, "Not in your wardrobe yet. Fix the tags here, then go back to Add an item and press Add to wardrobe.");
+    const back = document.querySelector('a[href="wardrobe.html"].muted');
+    back.href = "add.html"; back.textContent = "← Add an item";
+    document.getElementById("removeBtn").textContent = "Don't add this";
+  }
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const diff = changes();
+  if (!Object.keys(diff).length) { showMessage(status, "Nothing to save: no tags changed."); return; }
+  try {
+    saved = await api(`/items/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(diff) });
+    buildForm();
+    showMessage(status, "Changes saved.");
+  } catch (err) {
+    showMessage(status, `Couldn't save: ${err.message}`, "error");
+  }
+});
+
+document.getElementById("undoBtn").addEventListener("click", () => { buildForm(); status.replaceChildren(); });
+
+available.addEventListener("change", async () => {
+  try {
+    saved = { ...saved, available: (await api(`/items/${id}`, { method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ available: available.checked }) })).available };
+    showMessage(status, saved.available ? "Back in your wardrobe: outfits can use it again."
+                                        : "Marked as in the laundry: outfits will skip it.");
+  } catch (err) {
+    available.checked = !available.checked;
+    showMessage(status, `Couldn't update: ${err.message}`, "error");
+  }
+});
+
+// Remove: ask once on the page (no pop-up), then DELETE /items/{id} and go back to the wardrobe.
+const removeBox = document.getElementById("removeBox");
+function askRemove() {
+  removeBox.replaceChildren(
+    el("span", { style: "font-weight: 600" }, "Remove this item for good? This can't be undone."),
+    el("button", { class: "btn btn-dark", type: "button", onclick: doRemove }, "Yes, remove it"),
+    el("button", { class: "btn btn-ghost", type: "button", onclick: resetRemove }, "Keep it"));
+}
+function resetRemove() {
+  removeBox.replaceChildren(el("button", { class: "btn btn-ghost", type: "button", onclick: askRemove },
+    saved && saved.pending ? "Don't add this" : "Remove from wardrobe"));
+}
+async function doRemove() {
+  try {
+    await api(`/items/${id}`, { method: "DELETE" });
+    location.href = saved.pending ? "add.html" : `wardrobe.html?removed=${encodeURIComponent(itemName(saved))}`;
+  } catch (err) {
+    resetRemove();
+    showMessage(status, `Couldn't remove it: ${err.message}`, "error");
+  }
+}
+document.getElementById("removeBtn").addEventListener("click", askRemove);
+
+load();
+</script>
+</body>
+</html>

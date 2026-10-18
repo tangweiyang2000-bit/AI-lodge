@@ -27,16 +27,18 @@ import functools
 import io
 import json
 import os
+import threading
 import traceback
 import uuid
 
 import psycopg
 import torch
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, UploadFile
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, UploadFile
 from openai import OpenAI
 from pgvector.psycopg import register_vector
-from PIL import Image
+from PIL import Image, ImageOps
+from pydantic import BaseModel
 from transformers import CLIPModel, CLIPProcessor
 
 load_dotenv()  # uvicorn doesn't read .env on its own
@@ -349,15 +351,87 @@ def save_item(item_id, image_path, original_filename, tags, vector):
 #    Progress is only printed to the terminal (nothing extra is stored in the database):
 #      TAGGING -> TAGGED -> UPLOADED, or TAGGING_FAILED / UPLOAD_FAILED
 # ---------------------------------------------------------------------------
+def remove_background(item_id: str, image_path: str) -> str:
+    """Cut the garment out of an uploaded photo with macos_generate's pipeline
+    (macOS Vision + Real-ESRGAN) and save it as uploads/<id>_cutout.png.
+    Returns the cut-out's path, or the original path if anything goes wrong,
+    so a failed cut-out never loses the item."""
+    try:
+        from macos_generate.use_macos_generate import make_cutout
+        cutout_path = f"uploads/{item_id}_cutout.png"
+        make_cutout(os.path.abspath(image_path)).save(cutout_path)
+        print(f"[BACKGROUND_REMOVED] {item_id} -> {cutout_path}")
+        return cutout_path
+    except Exception:
+        traceback.print_exc()
+        print(f"[BACKGROUND_KEPT] {item_id}: background removal failed, using the original photo")
+        return image_path
+
+
+# Website uploads wait here until you press "Add to wardrobe" (POST /items/{id}/confirm):
+# uploads/pending/<id>.json holds the tags and vector, so nothing reaches the
+# items table (or the outfits) before you've checked it. Survives a server restart.
+PENDING_DIR = os.path.join("uploads", "pending")
+
+
+def pending_path(item_id) -> str:
+    return os.path.join(PENDING_DIR, f"{item_id}.json")
+
+
+def hold_for_review(item_id, image_path, original_filename, tags, vector):
+    os.makedirs(PENDING_DIR, exist_ok=True)
+    with open(pending_path(item_id), "w") as f:
+        json.dump({"id": str(item_id), "image_path": image_path, "original_filename": original_filename,
+                   "tags": tags, "vector": [float(v) for v in vector], "available": True}, f)
+
+
+def load_pending(item_id) -> dict | None:
+    try:
+        with open(pending_path(item_id)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def pending_item(item_id) -> dict | None:
+    """A held upload in the same shape as GET /items/{id}, plus "pending": true."""
+    held = load_pending(item_id)
+    if held is None:
+        return None
+    item = {"id": held["id"], "image_path": held["image_path"], "original_filename": held["original_filename"],
+            **{f: held["tags"].get(f) for f in TAG_FIELDS}, "colors": held["tags"].get("colors") or [],
+            "available": held.get("available", True), "pending": True}
+    return item
+
+
+# The website uploads a whole batch at once. Up to UPLOAD_WORKERS photos (default 4) are
+# processed side by side: most of the time is spent waiting on OpenAI and the cut-out tool,
+# which are fine in parallel. The two steps that share one resource take turns instead:
+# CLIP (one model in memory, _clip_lock below) and upscaling (the GPU, in use_macos_generate).
+_workers = threading.BoundedSemaphore(int(os.environ.get("UPLOAD_WORKERS", "4")))
+_clip_lock = threading.Lock()
+
+
 def tagging_worker(item_id: str, image_path: str,
-                   original_filename: str, media_type: str):
+                   original_filename: str, media_type: str, cut_out: bool = False, hold: bool = False):
+    with _workers:
+        _tagging_worker(item_id, image_path, original_filename, media_type, cut_out, hold)
+
+
+def _tagging_worker(item_id: str, image_path: str,
+                    original_filename: str, media_type: str, cut_out: bool = False, hold: bool = False):
     # Background tasks fail silently from the client's view, so log the traceback.
     print(f"[TAGGING] {item_id} ({original_filename}) with {OPENAI_MODEL}")
+    if cut_out:  # uploads: tag and store the cut-out, like the items in macos_generate/
+        image_path = remove_background(item_id, image_path)
+        if image_path.endswith("_cutout.png"):
+            media_type = "image/png"
     try:
         with open(image_path, "rb") as f:
             image_bytes = f.read()
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        vector = clip_image_vector(img)
+        with _clip_lock:
+            vector = clip_image_vector(img)
     except Exception:
         traceback.print_exc()
         print(f"[TAGGING_FAILED] {item_id} ({original_filename})")
@@ -372,6 +446,15 @@ def tagging_worker(item_id: str, image_path: str,
         tags = validate({})
         print(f"[TAGGING_FAILED] {item_id}: openai failed, saving with empty tags")
 
+    if hold:   # website upload: wait for "Add to wardrobe"
+        try:
+            hold_for_review(item_id, image_path, original_filename, tags, vector)
+        except Exception:
+            traceback.print_exc()
+            print(f"[UPLOAD_FAILED] {item_id} ({original_filename})")
+            return
+        print(f"[READY_FOR_REVIEW] {item_id}: waiting for Add to wardrobe")
+        return
     try:
         save_item(item_id, image_path, original_filename, tags, vector)
     except Exception:
@@ -394,16 +477,244 @@ app = FastAPI(lifespan=lifespan)
 os.makedirs("uploads", exist_ok=True)
 
 
+def display_filename(name: str | None, filename: str) -> str:
+    """The name you typed becomes the item's original_filename (keeping the photo's
+    extension), because that's what the website and outfit engine show as its name.
+    No name typed: the photo's own file name, as before."""
+    name = " ".join((name or "").replace("/", " ").replace("\\", " ").split())[:60]
+    if not name:
+        return filename
+    return name + os.path.splitext(filename)[1].lower()
+
+
+def make_upright(image_path: str) -> None:
+    """Phone cameras save photos sideways plus an EXIF note saying "rotate me".
+    Browsers obey the note, but the cut-out tool (macOS Vision) and CLIP read the raw
+    pixels, so the garment came out sideways. Turn the pixels the right way up once,
+    here, and drop the note. Photos without the note are left untouched."""
+    try:
+        with Image.open(image_path) as img:
+            if img.getexif().get(0x0112, 1) == 1:   # 0x0112 = Orientation; 1 = already upright
+                return
+            fmt = img.format
+            upright = ImageOps.exif_transpose(img)
+        if fmt == "JPEG":
+            upright.convert("RGB").save(image_path, "JPEG", quality=95)
+        else:
+            upright.save(image_path, fmt)
+        print(f"[ROTATED] {image_path} turned upright")
+    except Exception:
+        traceback.print_exc()   # e.g. a format PIL can't read: carry on with the photo as it is
+
+
 @app.post("/items")
-async def upload_item(file: UploadFile, background: BackgroundTasks):
+async def upload_item(file: UploadFile, background: BackgroundTasks, name: str | None = Form(None)):
     item_id = str(uuid.uuid4())
     image_path = f"uploads/{item_id}_{file.filename}"
     with open(image_path, "wb") as f:
         f.write(await file.read())
+    make_upright(image_path)
 
-    background.add_task(tagging_worker, item_id, image_path,
-                        file.filename, file.content_type or "image/jpeg")
+    background.add_task(tagging_worker, item_id, image_path, display_filename(name, file.filename),
+                        file.content_type or "image/jpeg", True, True)  # remove background, hold for review
     return {"item_id": item_id, "status": "tagging"}
+
+
+# ---------------------------------------------------------------------------
+# 7b. Read and edit items (for the UI): list them, get one, change tags or
+#     availability by hand. Manual edits only check the values are allowed;
+#     the validate() rules are for the model's answers, not yours.
+# ---------------------------------------------------------------------------
+ITEM_FIELDS = ["id", "image_path", "original_filename", "category", "subcategory", "color",
+               "colors", "pattern", "formality", "sleeve", "shade", "available"]
+TAG_FIELDS = ["category", "subcategory", "color", "pattern", "formality", "sleeve", "shade"]
+
+
+def item_from_row(row) -> dict:
+    item = dict(zip(ITEM_FIELDS, row))
+    item["id"] = str(item["id"])
+    # colors is stored as "blue, yellow" or "none"; the API uses a list
+    item["colors"] = [] if item["colors"] in (None, "", "none") else item["colors"].split(", ")
+    return item
+
+
+def select_items(where: str = "", params: tuple = ()) -> list[dict]:
+    query = psycopg.sql.SQL("SELECT {} FROM {} " + where + " ORDER BY original_filename").format(
+        psycopg.sql.SQL(", ").join(map(psycopg.sql.Identifier, ITEM_FIELDS)),
+        psycopg.sql.Identifier(ITEMS_TABLE))
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        return [item_from_row(r) for r in conn.execute(query, params).fetchall()]
+
+
+WEARS_TABLE = os.environ.get("WEARS_TABLE", "outfit_wears")   # "I wore this" (add_feedback.sql)
+
+
+def with_last_worn(items: list[dict]) -> list[dict]:
+    """Add "last_worn" (YYYY-MM-DD, or None if never) to each item, from the wear history."""
+    worn = {}
+    try:
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+            worn = {str(i): d.isoformat() for i, d in conn.execute(psycopg.sql.SQL(
+                "SELECT item_id, max(worn_on) FROM {}, unnest(item_ids) AS item_id GROUP BY item_id")
+                .format(psycopg.sql.Identifier(WEARS_TABLE))).fetchall()}
+    except psycopg.errors.UndefinedTable:
+        pass   # add_feedback.sql not run yet: nothing has been worn
+    for item in items:
+        item["last_worn"] = worn.get(item["id"])
+    return items
+
+
+@app.get("/items")
+def list_items():
+    """Every item with its tags, availability and when it was last worn, for the Wardrobe screen."""
+    return with_last_worn(select_items())
+
+
+@app.get("/items/{item_id}")
+def get_item(item_id: uuid.UUID):
+    """One item. Uploads not added yet come back with "pending": true; 404 = unknown or still tagging."""
+    items = select_items("WHERE id = %s", (item_id,))
+    if items:
+        return with_last_worn(items)[0]
+    held = pending_item(item_id)
+    if held is None:
+        raise HTTPException(404, "No item with that id")
+    return held
+
+
+class ConfirmBody(BaseModel):
+    name: str | None = None   # the name typed on the Add page (blank = keep the photo's file name)
+
+
+@app.post("/items/{item_id}/confirm")
+def confirm_item(item_id: uuid.UUID, body: ConfirmBody | None = None):
+    """"Add to wardrobe": move a checked upload from uploads/pending/ into the items table,
+    with the name you typed while it was being processed."""
+    held = load_pending(item_id)
+    if held is None:
+        if select_items("WHERE id = %s", (item_id,)):
+            return select_items("WHERE id = %s", (item_id,))[0]   # already added
+        raise HTTPException(404, "No upload waiting with that id")
+    name = display_filename(body.name if body else None, held["original_filename"])
+    save_item(item_id, held["image_path"], name, held["tags"], held["vector"])
+    if not held.get("available", True):
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+            conn.execute(psycopg.sql.SQL("UPDATE {} SET available = false WHERE id = %s").format(
+                psycopg.sql.Identifier(ITEMS_TABLE)), (item_id,))
+    os.remove(pending_path(item_id))
+    print(f"[UPLOADED] {item_id} added to the wardrobe")
+    return select_items("WHERE id = %s", (item_id,))[0]
+
+
+class ItemUpdate(BaseModel):
+    """Only the fields you send are changed; leave the rest out."""
+    category: str | None = None
+    subcategory: str | None = None
+    color: str | None = None
+    colors: list[str] | None = None
+    pattern: str | None = None
+    formality: str | None = None
+    sleeve: str | None = None
+    shade: str | None = None
+    available: bool | None = None
+
+
+@app.patch("/items/{item_id}")
+def update_item(item_id: uuid.UUID, body: ItemUpdate):
+    """Change some of an item's tags and/or its availability, e.g. {"color": "green"}
+    or {"available": false} when it goes in the laundry."""
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(400, "Send at least one field to change")
+
+    raw_colors = None   # the colors list as sent, for uploads not added yet
+    # Every value must be one of the allowed tags (pattern may also be "none", as for footwear)
+    for field in TAG_FIELDS:
+        if field in changes:
+            allowed = ALLOWED[field] + (["none"] if field == "pattern" else [])
+            if changes[field] not in allowed:
+                raise HTTPException(422, f"{field} must be one of {allowed}")
+    if "colors" in changes:
+        bad = [c for c in changes["colors"] if c not in MULTI_COLORS]
+        if bad:
+            raise HTTPException(422, f"colors must come from {MULTI_COLORS}, not {bad}")
+        raw_colors = changes["colors"]
+        changes["colors"] = ", ".join(changes["colors"]) or "none"
+    # colors only means something for multicolor items
+    if "color" in changes and changes["color"] != "multicolor":
+        changes["colors"] = "none"
+
+    query = psycopg.sql.SQL("UPDATE {} SET {} WHERE id = %s RETURNING {}").format(
+        psycopg.sql.Identifier(ITEMS_TABLE),
+        psycopg.sql.SQL(", ").join(psycopg.sql.SQL("{} = %s").format(psycopg.sql.Identifier(f))
+                                   for f in changes),
+        psycopg.sql.SQL(", ").join(map(psycopg.sql.Identifier, ITEM_FIELDS)))
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        row = conn.execute(query, (*changes.values(), item_id)).fetchone()
+    if row is not None:
+        print(f"[EDITED] {item_id}: {changes}")
+        return item_from_row(row)
+
+    # Not in the wardrobe yet: edit the held upload instead
+    held = load_pending(item_id)
+    if held is None:
+        raise HTTPException(404, "No item with that id")
+    for field in TAG_FIELDS:
+        if field in changes:
+            held["tags"][field] = changes[field]
+    if "colors" in changes:
+        held["tags"]["colors"] = raw_colors if changes["colors"] != "none" else None
+    if "available" in changes:
+        held["available"] = changes["available"]
+    with open(pending_path(item_id), "w") as f:
+        json.dump(held, f)
+    print(f"[EDITED] {item_id} (not added yet): {changes}")
+    return pending_item(item_id)
+
+
+@app.delete("/items/{item_id}")
+def delete_item(item_id: uuid.UUID):
+    """Remove an item from the wardrobe for good. Its uploaded photos (uploads/<id>_*)
+    are deleted too; photos elsewhere, like macos_generate/, are never touched."""
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        row = conn.execute(psycopg.sql.SQL("DELETE FROM {} WHERE id = %s RETURNING image_path").format(
+            psycopg.sql.Identifier(ITEMS_TABLE)), (item_id,)).fetchone()
+    if row is None and load_pending(item_id) is None:
+        raise HTTPException(404, "No item with that id")
+    if load_pending(item_id) is not None:   # an upload you decided not to add
+        os.remove(pending_path(item_id))
+    removed = []
+    if os.path.isdir("uploads"):
+        for name in os.listdir("uploads"):
+            if name.startswith(f"{item_id}_"):
+                os.remove(os.path.join("uploads", name))
+                removed.append(name)
+    print(f"[DELETED] {item_id} (photos removed: {removed or 'none'})")
+    return {"deleted": str(item_id)}
+
+
+@app.get("/allowed")
+def allowed_values():
+    """The allowed tag values, so the UI's dropdowns use the same lists as the tagger."""
+    return {**ALLOWED, "multi_colors": MULTI_COLORS}
+
+
+@app.get("/items/{item_id}/similar")
+def similar_items(item_id: uuid.UUID, n: int = 3):
+    """The n items whose CLIP vectors are closest to this one ("Looks similar")."""
+    table = psycopg.sql.Identifier(ITEMS_TABLE)
+    fields = psycopg.sql.SQL(", ").join(map(psycopg.sql.Identifier, ITEM_FIELDS))
+    query = psycopg.sql.SQL(
+        """SELECT {fields}, 1 - (clip_vec <=> (SELECT clip_vec FROM {t} WHERE id = %s)) AS score
+           FROM {t}
+           WHERE id <> %s AND clip_vec IS NOT NULL
+           ORDER BY clip_vec <=> (SELECT clip_vec FROM {t} WHERE id = %s)
+           LIMIT %s""").format(fields=fields, t=table)
+    if not select_items("WHERE id = %s", (item_id,)):
+        raise HTTPException(404, "No item with that id")
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        rows = conn.execute(query, (item_id, item_id, item_id, max(1, min(n, 12)))).fetchall()
+    return [item_from_row(r[:-1]) | {"score": round(float(r[-1]), 2)} for r in rows]
 
 
 # ---------------------------------------------------------------------------

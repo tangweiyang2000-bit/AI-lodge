@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wardrobe — wardrobe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css?v=31">
+</head>
+<body>
+<header class="site-header">
+  <a class="wordmark" href="index.html">wardrobe</a>
+  <nav class="site-nav" aria-label="Main">
+    <a href="index.html">Today</a>
+    <a href="wardrobe.html" aria-current="page">Wardrobe</a>
+    <a href="add.html">Add an item</a>
+    <a href="history.html">History</a>
+  </nav>
+</header>
+
+<main class="layout">
+  <section class="side" aria-labelledby="wTitle" style="max-width: 320px">
+    <h1 class="big" id="wTitle">Your wardrobe</h1>
+    <p class="muted" id="counts" style="margin: 0">Loading…</p>
+    <label for="search" class="visually-hidden">Search items</label>
+    <input id="search" class="field" type="search" placeholder="Search navy, polo, AF1" style="border-radius: 999px">
+    <div role="group" aria-label="Filter by category" style="display: flex; flex-wrap: wrap; gap: 8px" id="filters">
+      <button type="button" class="chip peach" data-cat="all" aria-pressed="true">All</button>
+      <button type="button" class="chip top" data-cat="top" aria-pressed="false">Tops</button>
+      <button type="button" class="chip bottom" data-cat="bottom" aria-pressed="false">Bottoms</button>
+      <button type="button" class="chip footwear" data-cat="footwear" aria-pressed="false">Shoes</button>
+    </div>
+    <button type="button" class="chip unworn-chip" id="unwornBtn" aria-pressed="false">Not worn lately</button>
+    <label class="check"><input type="checkbox" id="showAway" checked> Show what's in the laundry</label>
+    <div id="selectBar" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px">
+      <button class="btn btn-ghost" type="button" id="selectBtn">Select to remove</button>
+    </div>
+    <a class="btn" href="add.html" style="align-self: flex-start; margin-top: auto">Add an item</a>
+  </section>
+
+  <section class="stage" aria-label="Items">
+    <div id="status"></div>
+    <ul class="grid" id="grid"></ul>
+  </section>
+</main>
+
+<script src="common.js?v=31"></script>
+<script>
+// Wardrobe: GET /items, then filter in the browser (category, search, laundry).
+let items = [];
+let category = "all";
+let unwornOnly = false;   // "Not worn lately": not worn in 30+ days (or never)
+let selecting = false;        // select mode: tapping a tile ticks it instead of opening it
+const picked = new Set();     // ids of the ticked items
+
+const grid = document.getElementById("grid");
+const counts = document.getElementById("counts");
+const status = document.getElementById("status");
+const search = document.getElementById("search");
+const showAway = document.getElementById("showAway");
+
+function render() {
+  const q = search.value.trim().toLowerCase();
+  const shown = items.filter((it) =>
+    (category === "all" || it.category === category)
+    && (showAway.checked || it.available)
+    && (!unwornOnly || isUnworn(it))
+    && (!q || `${itemName(it)} ${tagLine(it)} ${it.formality} ${it.original_filename}`.toLowerCase().includes(q)));
+
+  grid.replaceChildren(...shown.map((it) => el("li", { class: `tile ${categoryClass(it)} ${it.available ? "" : "away"} ${picked.has(it.id) ? "picked" : ""}` },
+    el("a", { href: `item.html?id=${it.id}`, onclick: (e) => tileClick(e, it),
+              "aria-pressed": selecting ? String(picked.has(it.id)) : null },
+      selecting ? el("span", { class: "tick", "aria-hidden": "true" }, picked.has(it.id) ? "✓" : "") : null,
+      el("div", { class: "tile-pic" },
+        el("img", { src: thumbUrl(it), alt: "", loading: "lazy" }),
+        it.available ? null : el("span", { class: "badge" }, "In the laundry"),
+        isUnworn(it) ? el("span", { class: "badge unworn", title: lastWornText(it) },
+          `Not worn in ${UNWORN_DAYS}+ days`) : null),
+      el("span", { class: "tile-name" }, itemName(it)),
+      el("span", { class: "tile-tags" }, tagLine(it))))));
+
+  if (!shown.length && items.length) showMessage(status, unwornOnly
+      ? "Nothing has gone 30 days without being worn."
+      : "Nothing matches. Clear the search or pick another filter.");
+  else status.replaceChildren();
+}
+
+async function load() {
+  try {
+    items = (await api("/items")).sort(byItemNumber);
+    const away = items.filter((it) => !it.available).length;
+    counts.textContent = `${items.length} items, ${away} in the laundry`;
+    document.getElementById("unwornBtn").textContent = `Not worn lately ${items.filter(isUnworn).length}`;
+    const n = (cat) => items.filter((it) => it.category === cat).length;
+    document.querySelector('[data-cat="all"]').textContent = `All ${items.length}`;
+    document.querySelector('[data-cat="top"]').textContent = `Tops ${n("top")}`;
+    document.querySelector('[data-cat="bottom"]').textContent = `Bottoms ${n("bottom")}`;
+    document.querySelector('[data-cat="footwear"]').textContent = `Shoes ${n("footwear")}`;
+    render();
+    if (!items.length) showMessage(status, "Your wardrobe is empty. Add your first item to get started.");
+    const removed = new URLSearchParams(location.search).get("removed");
+    if (removed) {
+      showMessage(status, `Removed ${removed} from your wardrobe.`);
+      history.replaceState(null, "", "wardrobe.html");   // don't show it again on refresh
+    }
+  } catch (err) {
+    counts.textContent = "";
+    showMessage(status, `Couldn't load your wardrobe: ${err.message}. Check the server is running.`, "error");
+  }
+}
+
+document.querySelectorAll("#filters button").forEach((b) => b.addEventListener("click", () => {
+  category = b.dataset.cat;
+  document.querySelectorAll("#filters button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  render();
+}));
+// ---- Select a few, then remove them together ----
+const selectBar = document.getElementById("selectBar");
+
+function tileClick(e, it) {
+  if (!selecting) return;          // normal mode: open the item page
+  e.preventDefault();
+  picked.has(it.id) ? picked.delete(it.id) : picked.add(it.id);
+  render();
+  drawBar();
+}
+
+function drawBar(confirming = false) {
+  const btn = (text, cls, onclick, disabled) => el("button", { class: `btn ${cls}`, type: "button", onclick, disabled }, text);
+  if (!selecting) {
+    selectBar.replaceChildren(btn("Select to remove", "btn-ghost", startSelect));
+  } else if (confirming) {
+    selectBar.replaceChildren(
+      el("span", { style: "font-weight: 600" }, `Remove ${picked.size} item${picked.size === 1 ? "" : "s"} for good? This can't be undone.`),
+      btn("Yes, remove", "btn-dark", removePicked),
+      btn("Keep them", "btn-ghost", () => drawBar()));
+  } else {
+    selectBar.replaceChildren(
+      el("span", { style: "font-weight: 600; width: 100%" }, picked.size ? `${picked.size} selected` : "Tap items to select them"),
+      btn("Remove selected", "btn-dark", () => drawBar(true), !picked.size),
+      btn("Cancel", "btn-ghost", stopSelect));
+  }
+}
+
+function startSelect() { selecting = true; picked.clear(); render(); drawBar(); }
+function stopSelect() { selecting = false; picked.clear(); render(); drawBar(); }
+
+async function removePicked() {
+  const ids = [...picked];
+  selectBar.replaceChildren(el("span", { style: "font-weight: 600" }, `Removing ${ids.length}…`));
+  const failed = [];
+  for (const id of ids) {   // one at a time, so one failure doesn't stop the rest
+    try { await api(`/items/${id}`, { method: "DELETE" }); }
+    catch (err) { failed.push(id); }
+  }
+  selecting = false;
+  picked.clear();
+  await load();
+  drawBar();
+  const done = ids.length - failed.length;
+  showMessage(status, failed.length
+    ? `Removed ${done}, but ${failed.length} couldn't be removed. Check the server is running and try those again.`
+    : `Removed ${done} item${done === 1 ? "" : "s"} from your wardrobe.`, failed.length ? "error" : "");
+}
+
+document.getElementById("selectBtn").addEventListener("click", startSelect);
+document.getElementById("unwornBtn").addEventListener("click", (e) => {
+  unwornOnly = !unwornOnly;
+  e.currentTarget.setAttribute("aria-pressed", String(unwornOnly));
+  render();
+});
+search.addEventListener("input", render);
+showAway.addEventListener("change", render);
+load();
+</script>
+</body>
+</html>

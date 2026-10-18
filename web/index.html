@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Today — wardrobe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css?v=31">
+</head>
+<body>
+<header class="site-header">
+  <a class="wordmark" href="index.html">wardrobe</a>
+  <nav class="site-nav" aria-label="Main">
+    <a href="index.html" aria-current="page">Today</a>
+    <a href="wardrobe.html">Wardrobe</a>
+    <a href="add.html">Add an item</a>
+    <a href="history.html">History</a>
+  </nav>
+</header>
+
+<main class="layout">
+  <section class="side" aria-labelledby="ask">
+    <h1 class="big" id="ask">Where are you off to?</h1>
+    <form id="askForm" style="display: flex; flex-direction: column; gap: 14px">
+      <label for="request" class="visually-hidden">Describe your day</label>
+      <textarea id="request" class="field" rows="3" placeholder="e.g. dinner with friends tonight, aircon restaurant" required></textarea>
+      <button class="btn" id="dressBtn" type="submit" style="align-self: flex-start">Dress me</button>
+    </form>
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <span class="small muted">Or try</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px" id="ideas">
+        <button type="button" class="chip top">School</button>
+        <button type="button" class="chip bottom">Gym</button>
+        <button type="button" class="chip footwear">Mala dinner</button>
+        <button type="button" class="chip peach">Date night</button>
+      </div>
+    </div>
+    <div class="rail-box" id="railBox" hidden>
+      <span class="small muted" id="railTitle">Your wardrobe</span>
+      <div class="ward">
+        <div class="cab" id="cab">
+          <div class="inner" id="rail" aria-hidden="true"></div>
+          <button class="door l" type="button" aria-label="Open your wardrobe"><span class="knob"></span></button>
+          <button class="door r" type="button" aria-label="Open your wardrobe"><span class="knob"></span></button>
+        </div>
+        <div class="feet"><span></span><span></span></div>
+      </div>
+    </div>
+    <p class="small muted" id="understood" style="margin: auto 0 0"></p>
+  </section>
+
+  <section class="stage" aria-label="Outfits" aria-live="polite">
+    <div class="board" id="board">
+      <div class="board-empty">
+        <h2 class="mid" style="color: var(--ink)">Your outfits show up here</h2>
+        <p style="margin: 0">Describe where you're going, then press Dress me.</p>
+      </div>
+    </div>
+    <div class="swap-bar" id="swapBar" hidden></div>
+    <div class="thumbs" id="thumbs"></div>
+  </section>
+</main>
+
+<script src="gsap.min.js"></script>
+<script src="common.js?v=31"></script>
+<script>
+// Today: send the request to POST /outfits and lay out the outfits flat-lay style.
+// The latest outfits are remembered, so they're still here after you visit another page.
+//
+// The show (when GSAP loaded and Reduce Motion is off):
+//  1. While the AI thinks, the board flicks through your real clothes like a slot machine,
+//     and tiles in "Your wardrobe" light up as if it's looking through them.
+//  2. When the outfit arrives, the reels stop one by one on the chosen pieces while their
+//     tiles in "Your wardrobe" pulse. Switching outfits flies pieces back into the wardrobe
+//     and pulls the next ones out.
+//  On phones (no wardrobe panel) the pieces drop onto the board instead.
+const BOARD_COLOURS = ["var(--footwear)", "var(--top)", "var(--bottom)"];
+
+// Where each piece sits on the board: [left %, top %, width %, rotation°], by slot.
+const LAYOUTS = {
+  2: { top: [10, 6, 42, -5], bottom: [56, 4, 26, 4] },
+  3: { top: [8, 6, 40, -5], bottom: [50, 4, 22, 4], footwear: [74, 30, 17, -8],
+       outerwear: [8, 6, 40, -5] },
+  4: { outerwear: [4, 4, 34, -6], top: [30, 18, 30, 5], bottom: [62, 2, 16, -3], footwear: [80, 34, 13, 9] },
+};
+const SLOT_ORDER = ["outerwear", "top", "bottom", "footwear"];
+const MOTION = Boolean(window.gsap) && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const form = document.getElementById("askForm");
+const textarea = document.getElementById("request");
+const button = document.getElementById("dressBtn");
+const board = document.getElementById("board");
+const thumbs = document.getElementById("thumbs");
+const understood = document.getElementById("understood");
+const rail = document.getElementById("rail");
+const railBox = document.getElementById("railBox");
+const swapBar = document.getElementById("swapBar");
+
+// sessions holds the latest request only: [{text, result, picked, votes}]
+let sessions = [];
+let active = 0;
+const current = () => sessions[active];
+
+// ---- Remember today's outfits in this browser ----
+const SAVE_KEY = "wardrobe.today";
+const today = () => new Date().toDateString();
+function save() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ day: today(), sessions, active })); }
+  catch (_) { /* storage blocked: outfits just won't be remembered */ }
+}
+function restore() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
+    if (!saved || saved.day !== today() || !Array.isArray(saved.sessions)) return;
+    sessions = saved.sessions;
+    active = Math.min(saved.active || 0, sessions.length - 1);
+    if (sessions.length) showSession(active);
+  } catch (_) { /* unreadable: start fresh */ }
+}
+
+// ---- "Your wardrobe" panel: every available item as a small tile ----
+let wardrobe = [];   // available items from GET /items
+async function loadWardrobe() {
+  try {
+    wardrobe = (await api("/items")).filter((it) => it.available).sort(byItemNumber);
+  } catch (_) { return; }   // no wardrobe panel or shuffle; outfits still work
+  document.getElementById("railTitle").textContent = `Your wardrobe · ${wardrobe.length}`;
+  railBox.hidden = !wardrobe.length;
+  buildWardrobe();
+  setDoors(false);   // closed at rest; it opens while the AI is picking
+}
+
+// The wardrobe cabinet: a simple grid of everything, inside a cabinet of fixed size.
+// As the wardrobe grows the tiles shrink to fit (down to a minimum, then it scrolls),
+// so the cabinet always stays the same, sensible size. Each tile is a .rail-tile (data-id).
+const MIN_TILE = 18, MAX_TILE = 40, GAP = 4;
+function buildWardrobe() {
+  if (railBox.hidden) return;
+  const width = rail.clientWidth - 12, height = rail.clientHeight - 12;   // minus the inner padding
+  let size = MIN_TILE, cols = Math.max(1, Math.floor((width + GAP) / (MIN_TILE + GAP)));
+  for (let t = MAX_TILE; t >= MIN_TILE; t--) {            // biggest tiles that still fit everything
+    const c = Math.max(1, Math.floor((width + GAP) / (t + GAP)));
+    const rows = Math.ceil(wardrobe.length / c);
+    if (rows * (t * 4 / 3) + (rows - 1) * GAP <= height) { size = t; cols = c; break; }
+  }
+  rail.style.setProperty("--tile", `${size}px`);
+  rail.style.gridTemplateColumns = `repeat(${cols}, var(--tile))`;
+  rail.replaceChildren(...wardrobe.map((it) => el("div", { class: `rail-tile ${categoryClass(it)}`, "data-id": it.id, title: itemName(it) },
+    el("img", { src: thumbUrl(it), alt: "", decoding: "async" }))));
+  markOut();
+}
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(buildWardrobe, 200); });
+
+// Doors: closed at rest, swing open when you press Dress me; click them to open or close.
+const cab = document.getElementById("cab");
+function setDoors(open) {
+  cab.classList.toggle("open", open);
+  cab.querySelectorAll(".door").forEach((d) => d.setAttribute("aria-label", open ? "Close your wardrobe" : "Open your wardrobe"));
+}
+cab.querySelectorAll(".door").forEach((d) => d.addEventListener("click", () => setDoors(!cab.classList.contains("open"))));
+
+// Close the doors once the outfit is on the board (a short beat after it lands).
+let closeTimer;
+function closeDoorsSoon(delay = 900) {
+  clearTimeout(closeTimer);
+  closeTimer = setTimeout(() => setDoors(false), MOTION ? delay : 0);
+}
+function openDoors() {
+  clearTimeout(closeTimer);
+  const wasOpen = cab.classList.contains("open");
+  setDoors(true);
+  return wasOpen || !MOTION ? 0 : 0.55;   // seconds to wait for the doors to swing open
+}
+const railVisible = () => MOTION && !railBox.hidden && rail.offsetParent !== null && cab.classList.contains("open");   // hidden on phones / doors shut
+const tileFor = (item) => rail.querySelector(`[data-id="${CSS.escape(String(item.id))}"]`);
+
+// Dim the tiles of the pieces currently on the board ("they're out of the wardrobe").
+function markOut() {
+  const s = current();
+  const ids = new Set();
+  if (s && s.result.outfits && s.result.outfits[s.picked])
+    Object.values(s.result.outfits[s.picked].items).forEach((it) => ids.add(String(it.id)));
+  rail.querySelectorAll(".rail-tile").forEach((t) => t.classList.toggle("out", ids.has(t.dataset.id)));
+}
+
+function describeConstraints(c) {
+  if (!c) return "";
+  const bits = [c.formality.join(" or ")];
+  if (c.needs_warm_layer) bits.push("cold indoors");
+  if (c.is_active) bits.push("active");
+  if (c.is_messy) bits.push("messy food");
+  if (c.required_color) bits.push(`all ${c.required_color}`);
+  return "Reading it as " + bits.join(", ") + ".";
+}
+
+function emptyBoard(title, text) {
+  board.style.backgroundColor = "";
+  board.replaceChildren(el("div", { class: "board-empty" },
+    el("h2", { class: "mid", style: "color: var(--ink)" }, title),
+    el("p", { style: "margin: 0" }, text)));
+}
+
+// ---- 1. Slot machine while the AI thinks (it lands on the outfit when the answer comes) ----
+let shuffle = null;   // {timer, slots}
+function startShuffle() {
+  const byCat = (cat) => wardrobe.filter((it) => it.category === cat);
+  const pools = { top: byCat("top"), bottom: byCat("bottom"), footwear: byCat("footwear") };
+  if (!MOTION || !pools.top.length || !pools.bottom.length) {
+    emptyBoard("Putting outfits together…", "This takes a few seconds.");
+    return;
+  }
+  board.style.backgroundColor = "var(--panel)";
+  const slots = ["top", "bottom", "footwear"].filter((slot) => pools[slot].length).map((slot) => {
+    const [left, top, width, rot] = LAYOUTS[3][slot];
+    const img = el("img", { class: "piece spin", alt: "", "data-slot": slot,
+      style: `left: ${left}%; top: ${top}%; width: ${width}%; max-height: 72%` });
+    gsap.set(img, { rotation: rot });
+    return { slot, img, pool: pools[slot], i: Math.floor(Math.random() * pools[slot].length) };
+  });
+  board.replaceChildren(...slots.map((s) => s.img),
+    el("p", { class: "board-status" }, "Looking through your wardrobe…"));
+  const tick = () => {
+    slots.forEach((s) => {
+      s.i = (s.i + 1 + Math.floor(Math.random() * 3)) % s.pool.length;
+      s.img.src = thumbUrl(s.pool[s.i]);
+      gsap.fromTo(s.img, { yPercent: -6 }, { yPercent: 0, duration: 0.12, ease: "power1.out" });
+    });
+    // a few wardrobe tiles light up, as if it's checking them
+    if (railVisible()) {
+      const tiles = rail.querySelectorAll(".rail-tile");
+      for (let k = 0; k < 3; k++) {
+        const t = tiles[Math.floor(Math.random() * tiles.length)];
+        if (t) gsap.fromTo(t, { scale: 1.25, backgroundColor: "#FFFFFF" },
+                              { scale: 1, backgroundColor: "rgba(255,255,255,0)", duration: 0.5, ease: "power2.out", clearProps: "backgroundColor" });
+      }
+    }
+  };
+  tick();
+  shuffle = { timer: setInterval(tick, 110), slots };
+}
+
+// Land the slot machine on the outfit: each reel slows down and stops on the chosen piece,
+// one after another (top, bottom, shoes), sliding into that piece's spot with a bounce,
+// while its tile in "Your wardrobe" pulses. Resolves once every reel has stopped.
+function landShuffle(outfit, colour) {
+  if (!shuffle) return Promise.resolve([]);
+  const { timer, slots } = shuffle;
+  shuffle = null;
+  clearInterval(timer);
+  const order = SLOT_ORDER.filter((slot) => outfit.items[slot]);
+  const layout = LAYOUTS[order.length] || LAYOUTS[4];
+  const label = board.querySelector(".board-status");
+  if (label) gsap.to(label, { opacity: 0, duration: 0.25, onComplete: () => label.remove() });
+  Object.values(outfit.items).forEach((it) => { new Image().src = imageUrl(it); });   // warm the cache
+
+  const landed = [];
+  const stops = slots.map((reel, k) => new Promise((done) => {
+    const item = outfit.items[reel.slot];
+    if (!item) {                                   // this outfit has no piece for this reel
+      gsap.to(reel.img, { opacity: 0, scale: 0.8, duration: 0.3, delay: 0.2, onComplete: () => { reel.img.remove(); done(); } });
+      return;
+    }
+    const stopAt = 450 + k * 380;                  // reels stop one after another
+    const begin = performance.now();
+    let delay = 90;
+    const flick = () => {
+      if (performance.now() - begin + delay < stopAt) {     // keep spinning, slowing down
+        reel.i = (reel.i + 1) % reel.pool.length;
+        reel.img.src = thumbUrl(reel.pool[reel.i]);
+        gsap.fromTo(reel.img, { yPercent: -5 }, { yPercent: 0, duration: 0.1 });
+        delay *= 1.25;
+        setTimeout(flick, delay);
+        return;
+      }
+      // Stop on the chosen piece and settle into its place in the final layout
+      const [left, top, width, rot] = layout[reel.slot];
+      reel.img.src = imageUrl(item);
+      reel.img.alt = `${reel.slot}: ${itemName(item)}`;
+      if (k === 0) board.style.backgroundColor = colour;
+      gsap.timeline({ onComplete: done })
+        .fromTo(reel.img, { yPercent: -14 }, { yPercent: 0, duration: 0.55, ease: "back.out(3)" }, 0)
+        .to(reel.img, { left: `${left}%`, top: `${top}%`, width: `${width}%`, rotation: rot,
+                        duration: 0.45, ease: "power3.out" }, 0);
+      const tile = tileFor(item);
+      if (tile) {
+        tile.classList.add("out");
+        gsap.fromTo(tile, { scale: 1.45 }, { scale: 1, duration: 0.5, ease: "back.out(2)" });
+      }
+      landed.push(reel.slot);
+    };
+    setTimeout(flick, delay);
+  }));
+  return Promise.all(stops).then(() => landed);
+}
+
+// ---- Drawing an outfit on the board ----
+// mode: "fly" (pieces come out of Your wardrobe), "drop" (fall onto the board), "" (just draw),
+// or a list of slots the slot machine has already landed (only the rest animate in).
+function renderBoard(mode = "") {
+  const s = current();
+  const outfit = s.result.outfits[s.picked];
+  board.style.backgroundColor = BOARD_COLOURS[s.picked % BOARD_COLOURS.length];
+  const slots = SLOT_ORDER.filter((slot) => outfit.items[slot]);
+  const layout = LAYOUTS[slots.length] || LAYOUTS[4];
+  const pieces = slots.map((slot) => {
+    const item = outfit.items[slot];
+    const [left, top, width, rot] = layout[slot] || [10, 10, 30, 0];
+    const img = el("img", {
+      class: "piece", src: imageUrl(item), alt: `${slot}: ${itemName(item)}`,
+      style: `left: ${left}%; top: ${top}%; width: ${width}%; max-height: 72%`,
+    });
+    img.dataset.rot = rot;
+    img.dataset.slot = slot;
+    img.item = item;
+    img.classList.add("swappable");
+    img.title = `Tap to try a different ${SWAP_WORDS[slot]}`;
+    img.addEventListener("click", () => openSwap(slot));
+    if (MOTION) gsap.set(img, { rotation: rot });
+    else img.style.transform = `rotate(${rot}deg)`;
+    return img;
+  });
+  const up = el("button", { class: "icon-btn", type: "button", "aria-label": "Good suggestion",
+    "aria-pressed": String(s.votes[s.picked] === "up"), onclick: () => vote("up") }, icon("up"));
+  const down = el("button", { class: "icon-btn", type: "button", "aria-label": "Not for me",
+    "aria-pressed": String(s.votes[s.picked] === "down"), onclick: () => vote("down") }, icon("down"));
+  s.worn = s.worn || {};
+  s.reasons = s.reasons || {};
+  const worn = el("button", { class: "btn wear-btn", type: "button", "aria-pressed": String(Boolean(s.worn[s.picked])),
+    onclick: () => wore() }, s.worn[s.picked] ? "✓ Wore it today" : "I wore this");
+  // After a 👎: an optional one-tap reason (it decides where the outfit is avoided)
+  const why = s.votes[s.picked] === "down" ? el("div", { class: "why" },
+    el("span", { class: "why-label" }, "Why?"),
+    DOWN_REASONS.map(([value, label]) => el("button", {
+      type: "button", class: "why-chip", "aria-pressed": String(s.reasons[s.picked] === value),
+      onclick: () => chooseReason(value) }, label))) : null;
+  const caption = el("div", { class: "board-caption" },
+    el("div", {}, el("h2", {}, outfit.title || `Outfit ${s.picked + 1}`), el("p", {}, outfit.reason),
+      outfit.feedback === "up" ? el("p", { class: "liked-note" }, "You liked this one before") : null,
+      el("p", { class: "swap-hint" }, "Tip: tap a piece to swap it"),
+      why, el("p", { class: "vote-note", id: "voteNote" })),
+    el("div", { class: "board-actions" }, worn, up, down));
+  board.replaceChildren(...pieces, caption);
+  markOut();
+
+  if (!MOTION || !mode) return;
+  if (Array.isArray(mode)) {        // the slot machine already put these slots in place
+    const rest = pieces.filter((img) => !mode.includes(img.dataset.slot));   // e.g. a jacket: no reel for it
+    if (rest.length) dropIn(rest, caption);
+    else gsap.fromTo(caption, { y: 18, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35, ease: "power2.out" });
+  } else if (mode === "fly" && railVisible()) flyIn(pieces, caption);
+  else dropIn(pieces, caption);
+}
+
+function dropIn(pieces, caption) {
+  gsap.timeline()
+    .fromTo(pieces,
+      { y: () => -board.clientHeight * 0.6, opacity: 0, scale: 1.08,
+        rotation: (i, img) => +img.dataset.rot + (i % 2 ? 22 : -22) },
+      { y: 0, opacity: 1, scale: 1, rotation: (i, img) => +img.dataset.rot,
+        duration: 0.6, ease: "back.out(1.6)", stagger: 0.09 })
+    .fromTo(caption, { y: 18, opacity: 0 }, { y: 0, opacity: 1, duration: 0.35, ease: "power2.out" }, "-=0.3");
+}
+
+// A copy of the picture flies between a wardrobe tile and its spot on the board.
+function flight(fromRect, toRect, src, rotFrom, rotTo, delay, onDone) {
+  const ghost = el("img", { class: "flying", src, alt: "" });
+  document.body.append(ghost);
+  gsap.set(ghost, { left: fromRect.left, top: fromRect.top, width: fromRect.width, height: fromRect.height, rotation: rotFrom });
+  const tl = gsap.timeline({ delay, onComplete: () => { ghost.remove(); onDone && onDone(); } });
+  tl.to(ghost, { left: toRect.left, top: toRect.top, width: toRect.width, height: toRect.height,
+                 duration: 0.75, ease: "power3.inOut" }, 0)
+    .to(ghost, { rotation: rotTo, duration: 0.75, ease: "back.out(2.2)" }, 0)
+    .to(ghost, { scale: 1.12, duration: 0.375, ease: "power2.out", yoyo: true, repeat: 1 }, 0);   // lifts mid-air
+  return tl;
+}
+
+// Untilted box of a board piece, so the ghost lands exactly where the piece is drawn.
+function pieceBox(img) {
+  const b = board.getBoundingClientRect();
+  return { left: b.left + img.offsetLeft, top: b.top + img.offsetTop, width: img.offsetWidth, height: img.offsetHeight };
+}
+
+function flyIn(pieces, caption) {
+  gsap.set(caption, { opacity: 0, y: 18 });
+  let landed = 0;
+  pieces.forEach((img, i) => {
+    const tile = tileFor(img.item);
+    if (!tile) {
+      gsap.fromTo(img, { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 0.4, delay: i * 0.12 });
+      landed++;
+      return;
+    }
+    gsap.set(img, { opacity: 0 });
+    gsap.fromTo(tile, { scale: 1 }, { scale: 1.35, duration: 0.15, yoyo: true, repeat: 1, delay: i * 0.12 });
+    const go = () => flight((tile.querySelector("img") || tile).getBoundingClientRect(), pieceBox(img), img.src, 0, +img.dataset.rot, i * 0.12 + 0.1, () => {
+      gsap.set(img, { opacity: 1 });
+      gsap.fromTo(img, { scale: 1.06 }, { scale: 1, duration: 0.25, ease: "power2.out" });
+      if (++landed === pieces.length) gsap.to(caption, { opacity: 1, y: 0, duration: 0.35, ease: "power2.out" });
+    });
+    img.complete ? go() : img.addEventListener("load", go, { once: true });   // need its size first
+  });
+  if (landed === pieces.length) gsap.to(caption, { opacity: 1, y: 0, duration: 0.35 });
+}
+
+// Pieces on the board fly back into their wardrobe tiles (or drop away on phones).
+let leaving = null;
+function sendBack() {
+  const old = [...board.querySelectorAll(".piece")];
+  const caption = board.querySelector(".board-caption");
+  if (leaving) leaving.forEach((t) => t.progress(1));
+  leaving = null;
+  if (!MOTION || !old.length) return 0;
+  if (caption) gsap.to(caption, { opacity: 0, y: 12, duration: 0.15 });
+  if (!railVisible()) {
+    gsap.to(old, { y: 40, opacity: 0, duration: 0.18, ease: "power1.in", stagger: 0.025 });
+    return 0.2;
+  }
+  leaving = old.map((img, i) => {
+    const tile = img.item && tileFor(img.item);
+    if (!tile) return gsap.to(img, { opacity: 0, duration: 0.15 });
+    const from = img.getBoundingClientRect();
+    gsap.set(img, { opacity: 0 });
+    return flight(from, (tile.querySelector("img") || tile).getBoundingClientRect(), img.src, +img.dataset.rot, 0, i * 0.05, null);
+  });
+  return 0.25;   // the new pieces can start leaving the wardrobe while these are still flying home
+}
+
+function renderThumbs() {
+  const s = current();
+  thumbs.replaceChildren(...s.result.outfits.map((o, i) => el("button", {
+      class: "thumb", type: "button", "aria-pressed": String(i === s.picked),
+      style: `background: ${BOARD_COLOURS[i % BOARD_COLOURS.length]}`,
+      onclick: () => pickOutfit(i),
+    },
+    el("span", { class: "thumb-pics" },
+      SLOT_ORDER.filter((slot) => o.items[slot]).map((slot) => el("img", { src: thumbUrl(o.items[slot]), alt: "" }))),
+    el("span", { class: "thumb-title" }, o.title || `Outfit ${i + 1}`))));
+}
+
+// Switching outfits: the current pieces go home, the next ones come out.
+function pickOutfit(i) {
+  const s = current();
+  if (i === s.picked) return;
+  closeSwap();
+  const opening = openDoors();          // open up so pieces can go back and come out
+  s.picked = i;
+  renderThumbs();
+  save();
+  setTimeout(() => {
+    if (current() !== s || s.picked !== i) return;
+    const wait = sendBack();
+    setTimeout(() => {
+      if (current() !== s || s.picked !== i) return;
+      renderBoard("fly");
+      closeDoorsSoon(1500);              // after the new pieces have flown out
+    }, wait * 1000);
+  }, opening * 1000);
+}
+
+function showSession(i, mode = "") {
+  active = i;
+  const s = current();
+  textarea.value = s.text;
+  understood.textContent = describeConstraints(s.result.constraints);
+  if (!(s.result.outfits || []).length) {
+    emptyBoard("No complete outfit this time", s.result.message || "Try describing your day differently.");
+    thumbs.replaceChildren();
+    markOut();
+  } else {
+    renderBoard(mode);
+    renderThumbs();
+  }
+  save();
+}
+
+// ---- Swap one piece: tap a piece, pick one of 3 alternatives; the rest of the outfit stays ----
+const SWAP_WORDS = { top: "top", bottom: "bottom", outerwear: "layer", footwear: "pair of shoes" };
+let swapToken = 0;
+
+function closeSwap() {
+  swapToken++;
+  swapBar.hidden = true;
+  swapBar.replaceChildren();
+  board.querySelectorAll(".piece.swapping").forEach((p) => p.classList.remove("swapping"));
+}
+
+async function openSwap(slot) {
+  const s = current(), picked = s.picked, outfit = s.result.outfits[picked];
+  const token = ++swapToken;
+  board.querySelectorAll(".piece").forEach((p) => p.classList.toggle("swapping", p.dataset.slot === slot));
+  const cancel = el("button", { class: "link-btn", type: "button", onclick: closeSwap }, "Cancel");
+  swapBar.hidden = false;
+  swapBar.replaceChildren(el("div", { class: "swap-head" },
+    el("strong", {}, `Other ${slot === "footwear" ? "shoes" : SWAP_WORDS[slot] + "s"} for this outfit`), cancel),
+    el("p", { class: "muted", style: "margin: 0" }, "Finding options that go with the rest…"));
+  try {
+    const items = Object.fromEntries(Object.entries(outfit.items).map(([k, it]) => [k, it.id]));
+    const res = await api("/outfits/swap", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: s.text, items, slot, constraints: s.result.constraints, n: 3 }) });
+    if (token !== swapToken || current() !== s || s.picked !== picked) return;   // you moved on meanwhile
+    if (!res.options.length) {
+      swapBar.replaceChildren(el("div", { class: "swap-head" },
+        el("strong", {}, `No other ${slot === "footwear" ? "shoes" : SWAP_WORDS[slot] + "s"} fit this outfit right now`), cancel));
+      return;
+    }
+    swapBar.replaceChildren(el("div", { class: "swap-head" },
+      el("strong", {}, `Pick another ${SWAP_WORDS[slot]}`), cancel),
+      el("div", { class: "swap-options" }, res.options.map((opt) => el("button", {
+          type: "button", class: `swap-option ${categoryClass(opt.item)}`, onclick: () => applySwap(slot, opt) },
+        el("img", { src: thumbUrl(opt.item), alt: "" }),
+        el("span", { class: "swap-text" }, el("strong", {}, itemName(opt.item)), el("span", {}, opt.reason))))));
+    if (MOTION) gsap.from(swapBar.querySelectorAll(".swap-option"), { y: 12, opacity: 0, duration: 0.3, stagger: 0.06 });
+  } catch (err) {
+    if (token !== swapToken) return;
+    swapBar.replaceChildren(el("div", { class: "swap-head" },
+      el("strong", {}, `Couldn't find options: ${err.message}`), cancel));
+  }
+}
+
+function applySwap(slot, opt) {
+  const s = current(), picked = s.picked, outfit = s.result.outfits[picked];
+  const old = board.querySelector(`.piece[data-slot="${slot}"]`);
+  const swapIn = () => {
+    outfit.items = opt.items;               // the same outfit, with the new piece
+    outfit.feedback = null;                 // it's a new combination: start its votes fresh
+    s.votes[picked] = null;
+    s.reasons && (s.reasons[picked] = null);
+    s.worn && (s.worn[picked] = false);
+    closeSwap();
+    renderBoard();
+    renderThumbs();
+    save();
+    const fresh = board.querySelector(`.piece[data-slot="${slot}"]`);
+    if (MOTION && fresh) gsap.fromTo(fresh, { y: -60, opacity: 0, scale: 1.08, rotation: +fresh.dataset.rot - 14 },
+      { y: 0, opacity: 1, scale: 1, rotation: +fresh.dataset.rot, duration: 0.55, ease: "back.out(1.8)" });
+    note(`Swapped in the ${itemName(opt.item)}.`);
+  };
+  if (MOTION && old) gsap.to(old, { y: 40, opacity: 0, duration: 0.2, ease: "power1.in", onComplete: swapIn });
+  else swapIn();
+}
+
+// ---- The feedback loop: 👍 / 👎 (+ reason) and "I wore this" are saved on the server,
+// and the outfit engine learns from them (see gpt_outfit_engine.py). ----
+const DOWN_REASONS = [["colours clash", "Colours clash"], ["don't like a piece", "Don't like a piece"],
+  ["too formal", "Too formal"], ["too casual", "Too casual"], ["not for this occasion", "Not for this occasion"]];
+
+function outfitInfo(s) {
+  const outfit = s.result.outfits[s.picked];
+  return { item_ids: Object.values(outfit.items).map((it) => it.id),
+           formality: (s.result.constraints || {}).formality || [], request: s.text, title: outfit.title };
+}
+
+function note(text, isError = false) {
+  const el_ = document.getElementById("voteNote");
+  if (!el_) return;
+  el_.textContent = text;
+  el_.classList.toggle("error", isError);
+  if (MOTION) gsap.fromTo(el_, { opacity: 0 }, { opacity: 1, duration: 0.2 });
+}
+
+async function sendVote(s, picked, vote, reason = null) {
+  const body = { ...outfitInfo({ ...s, picked }), vote, reason };
+  await api("/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
+
+async function vote(kind) {
+  const s = current(), picked = s.picked;
+  const before = { vote: s.votes[picked], reason: s.reasons && s.reasons[picked] };
+  s.votes[picked] = s.votes[picked] === kind ? null : kind;
+  s.reasons = s.reasons || {};
+  s.reasons[picked] = null;
+  renderBoard();
+  save();
+  try {
+    await sendVote(s, picked, s.votes[picked]);
+    note(s.votes[picked] === "up" ? "Saved. I'll suggest more like this."
+       : s.votes[picked] === "down" ? "Saved. Tell me why if you like, or leave it."
+       : "Vote removed.");
+  } catch (err) {
+    s.votes[picked] = before.vote;
+    s.reasons[picked] = before.reason;
+    renderBoard();
+    save();
+    note(`Couldn't save your vote: ${err.message}`, true);
+  }
+}
+
+async function chooseReason(reason) {
+  const s = current(), picked = s.picked;
+  s.reasons[picked] = s.reasons[picked] === reason ? null : reason;
+  renderBoard();
+  save();
+  try {
+    await sendVote(s, picked, "down", s.reasons[picked]);
+    note(!s.reasons[picked] ? "Reason removed."
+       : ["colours clash", "don't like a piece"].includes(reason) ? "Got it. I won't suggest this outfit again."
+       : "Got it. I won't suggest it for this kind of occasion, but it can come back for others.");
+  } catch (err) {
+    note(`Couldn't save the reason: ${err.message}`, true);
+  }
+}
+
+async function wore() {
+  const s = current(), picked = s.picked;
+  s.worn = s.worn || {};
+  s.wearLiked = s.wearLiked || {};   // was the 👍 added by "I wore this"? (then undo removes it too)
+  const now = !s.worn[picked];
+  const before = { vote: s.votes[picked], reason: s.reasons && s.reasons[picked], wearLiked: s.wearLiked[picked] };
+  const undoLike = !now && s.wearLiked[picked] && s.votes[picked] === "up";
+  s.worn[picked] = now;
+  if (now) {
+    s.wearLiked[picked] = s.votes[picked] !== "up";
+    s.votes[picked] = "up";
+    s.reasons && (s.reasons[picked] = null);
+  } else if (undoLike) {
+    s.votes[picked] = null;
+    s.wearLiked[picked] = false;
+  }
+  renderBoard();
+  save();
+  try {
+    await api("/wears", { method: "POST", headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ ...outfitInfo(s), worn: now }) });
+    if (undoLike) await sendVote(s, picked, null);   // take back the like the wear added
+    note(now ? "Nice! Counted as a like. I'll rest this outfit for a week and give its pieces a few days off."
+             : undoLike ? "Okay, removed today's wear and the like it added." : "Okay, removed today's wear.");
+  } catch (err) {
+    s.worn[picked] = !now;
+    s.votes[picked] = before.vote;
+    s.reasons && (s.reasons[picked] = before.reason);
+    s.wearLiked[picked] = before.wearLiked;
+    renderBoard();
+    save();
+    note(`Couldn't save that: ${err.message}`, true);
+  }
+}
+
+async function dressMe(text) {
+  closeSwap();
+  button.disabled = true;
+  button.textContent = "Dressing you…";
+  thumbs.replaceChildren();
+  const wait = sendBack();
+  openDoors();   // the wardrobe swings open while the AI looks through it
+  const started = setTimeout(startShuffle, Math.max(wait * 1000 + 300, MOTION ? 650 : 0));
+  rail.querySelectorAll(".rail-tile.out").forEach((t) => t.classList.remove("out"));
+  try {
+    const result = await api("/outfits", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: text, n: 3 }),
+    });
+    clearTimeout(started);
+    const votes = {};
+    (result.outfits || []).forEach((o, i) => { if (o.feedback === "up") votes[i] = "up"; });   // liked before
+    sessions = [{ text, result, picked: 0, votes, reasons: {}, worn: {} }];   // replaces the previous outfits
+    const first = (result.outfits || [])[0];
+    let mode = "fly";
+    if (first && shuffle) mode = await landShuffle(first, BOARD_COLOURS[0]);   // reels stop on the outfit
+    else if (shuffle) { clearInterval(shuffle.timer); shuffle = null; }
+    showSession(0, mode);
+    closeDoorsSoon(Array.isArray(mode) ? 900 : 1600);   // outfit is on the board: close up
+  } catch (err) {
+    clearTimeout(started);
+    shuffle && clearInterval(shuffle.timer);
+    shuffle = null;
+    closeDoorsSoon(0);
+    emptyBoard("Couldn't get outfits", `${err.message}. Check the server is running, then try again.`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Dress me";
+  }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (textarea.value.trim()) dressMe(textarea.value.trim());
+});
+document.querySelectorAll("#ideas button").forEach((b) => b.addEventListener("click", () => {
+  textarea.value = b.textContent.toLowerCase();
+  dressMe(textarea.value);
+}));
+restore();
+loadWardrobe();
+</script>
+</body>
+</html>

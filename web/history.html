@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>History — wardrobe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css?v=31">
+</head>
+<body>
+<header class="site-header">
+  <a class="wordmark" href="index.html">wardrobe</a>
+  <nav class="site-nav" aria-label="Main">
+    <a href="index.html">Today</a>
+    <a href="wardrobe.html">Wardrobe</a>
+    <a href="add.html">Add an item</a>
+    <a href="history.html" aria-current="page">History</a>
+  </nav>
+</header>
+
+<main class="layout">
+  <section class="side" aria-labelledby="hTitle" style="max-width: 340px">
+    <h1 class="big" id="hTitle">Your feedback</h1>
+    <p class="muted" style="margin: 0">Everything you've liked, disliked or worn. The outfit engine learns from this, so fix anything that's wrong here.</p>
+    <div role="group" aria-label="Show" style="display: flex; flex-wrap: wrap; gap: 8px" id="filters">
+      <button type="button" class="chip peach" data-show="all" aria-pressed="true">All</button>
+      <button type="button" class="chip top" data-show="up" aria-pressed="false">Liked</button>
+      <button type="button" class="chip bottom" data-show="down" aria-pressed="false">Disliked</button>
+      <button type="button" class="chip footwear" data-show="worn" aria-pressed="false">Worn</button>
+    </div>
+    <p class="small muted" id="counts" style="margin: 0"></p>
+  </section>
+
+  <section class="stage" aria-label="History" aria-live="polite">
+    <div id="status"></div>
+    <ul class="history" id="list"></ul>
+  </section>
+</main>
+
+<script src="common.js?v=31"></script>
+<script>
+// History: GET /history lists every vote and wear; change or remove them here.
+// Votes are saved with POST /feedback, wears undone with POST /wears {worn: false}.
+const REASONS = [["", "No reason"], ["colours clash", "Colours clash"], ["don't like a piece", "Don't like a piece"],
+  ["too formal", "Too formal"], ["too casual", "Too casual"], ["not for this occasion", "Not for this occasion"]];
+const list = document.getElementById("list");
+const status = document.getElementById("status");
+let data = { votes: [], wears: [] };
+let show = "all";
+
+const day = (iso) => new Date(iso).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+const occasionText = (f) => f.length ? f.join(" or ") : "any occasion";
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+function pics(items) {
+  return el("span", { class: "history-pics" }, items.map((it) => el("img", { src: thumbUrl(it), alt: itemName(it), title: itemName(it) })));
+}
+
+function voteCard(v) {
+  const reason = el("select", { class: "field reason-select", "aria-label": "Reason", onchange: () => change(v, "down", reason.value || null) },
+    REASONS.map(([value, label]) => el("option", { value, selected: (v.reason || "") === value }, label)));
+  const where = v.vote === "up" ? "Liked"
+    : ["colours clash", "don't like a piece"].includes(v.reason) ? "Disliked: avoided for every occasion"
+    : `Disliked: avoided for ${occasionText(v.formality)} occasions`;
+  return el("li", { class: `history-card ${v.vote === "up" ? "liked" : "disliked"}` },
+    pics(v.items),
+    el("div", { class: "history-text" },
+      el("strong", {}, v.title || "Outfit"),
+      el("span", { class: "muted" }, `${where} · for “${v.request || "?"}” · ${day(v.when)}`),
+      v.vote === "down" ? reason : null),
+    el("div", { class: "history-actions" },
+      el("button", { class: "icon-btn", type: "button", "aria-label": "Liked", "aria-pressed": String(v.vote === "up"),
+        onclick: () => change(v, v.vote === "up" ? null : "up") }, icon("up")),
+      el("button", { class: "icon-btn", type: "button", "aria-label": "Disliked", "aria-pressed": String(v.vote === "down"),
+        onclick: () => change(v, v.vote === "down" ? null : "down") }, icon("down")),
+      el("button", { class: "link-btn", type: "button", onclick: () => change(v, null) }, "Remove")));
+}
+
+function wearCard(w) {
+  return el("li", { class: "history-card worn" },
+    pics(w.items),
+    el("div", { class: "history-text" },
+      el("strong", {}, w.title || "Outfit"),
+      el("span", { class: "muted" }, `Worn on ${day(w.worn_on)} · for “${w.request || "?"}”`)),
+    el("div", { class: "history-actions" },
+      el("button", { class: "link-btn", type: "button", onclick: () => unwear(w) }, "I didn't wear this")));
+}
+
+function render() {
+  const cards = [];
+  if (show === "all" || show === "worn") data.wears.forEach((w) => cards.push({ when: w.worn_on, node: wearCard(w) }));
+  data.votes.filter((v) => show === "all" || v.vote === show).forEach((v) => cards.push({ when: v.when, node: voteCard(v) }));
+  cards.sort((a, b) => b.when.localeCompare(a.when));
+  list.replaceChildren(...cards.map((c) => c.node));
+  const ups = data.votes.filter((v) => v.vote === "up").length;
+  document.getElementById("counts").textContent =
+    `${ups} liked · ${data.votes.length - ups} disliked · ${data.wears.length} worn`;
+  if (!cards.length) showMessage(status, show === "all" ? "Nothing yet. Use 👍, 👎 and I wore this on the Today page." : "Nothing here.");
+  else status.replaceChildren();
+}
+
+async function load() {
+  try { data = await api("/history"); render(); }
+  catch (err) { showMessage(status, `Couldn't load your history: ${err.message}`, "error"); }
+}
+
+async function change(v, vote, reason = null) {
+  try {
+    await post("/feedback", { item_ids: v.item_ids, vote, reason: vote === "down" ? reason : null,
+                              formality: v.formality, request: v.request, title: v.title });
+    await load();
+    showMessage(status, vote === null ? "Removed. The engine has forgotten that vote." : "Updated.");
+  } catch (err) { showMessage(status, `Couldn't update: ${err.message}`, "error"); }
+}
+
+async function unwear(w) {
+  try {
+    await post("/wears", { item_ids: w.item_ids, worn: false, worn_on: w.worn_on });
+    await load();
+    showMessage(status, "Removed that wear. If it also left a like you don't want, remove the like too.");
+  } catch (err) { showMessage(status, `Couldn't update: ${err.message}`, "error"); }
+}
+
+document.querySelectorAll("#filters button").forEach((b) => b.addEventListener("click", () => {
+  show = b.dataset.show;
+  document.querySelectorAll("#filters button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  render();
+}));
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add an item — wardrobe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css?v=31">
+</head>
+<body>
+<header class="site-header">
+  <a class="wordmark" href="index.html">wardrobe</a>
+  <nav class="site-nav" aria-label="Main">
+    <a href="index.html">Today</a>
+    <a href="wardrobe.html">Wardrobe</a>
+    <a href="add.html" aria-current="page">Add an item</a>
+    <a href="history.html">History</a>
+  </nav>
+</header>
+
+<main class="layout">
+  <section class="side" aria-labelledby="aTitle">
+    <h1 class="big" id="aTitle">Add something new</h1>
+    <label class="drop" id="drop" for="photo">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#5B3CC4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+      <span style="font-family: var(--display); font-weight: 700; font-size: 22px">Drop photos here</span>
+      <span class="muted">or <span style="color: var(--accent); text-decoration: underline">browse your files</span></span>
+      <input id="photo" type="file" accept="image/*" multiple class="visually-hidden">
+    </label>
+    <button class="btn btn-ghost" type="button" id="cameraBtn" style="align-self: flex-start">Take a photo</button>
+    <input id="cameraInput" type="file" accept="image/*" capture="environment" class="visually-hidden" tabindex="-1">
+    <div class="camera" id="camera" hidden>
+      <video id="video" autoplay playsinline muted></video>
+      <div style="display: flex; flex-wrap: wrap; gap: 10px">
+        <button class="btn" type="button" id="snapBtn">Snap</button>
+        <button class="btn btn-ghost" type="button" id="closeCamBtn">Done</button>
+      </div>
+    </div>
+    <p class="small muted" style="margin: 0">Lay it flat on a plain background in daylight, one item per photo. You can add several at once and name each one. Press Upload to remove the backgrounds and tag them; nothing goes into your wardrobe until you press Add to wardrobe.</p>
+    <div id="queueBox" hidden>
+      <h2 class="mid" id="queueTitle" style="margin-bottom: 10px">This batch</h2>
+      <ul class="queue" id="queue"></ul>
+      <button class="btn" type="button" id="addBtn" hidden style="margin-top: 12px">Upload</button>
+      <button class="btn" type="button" id="confirmBtn" hidden style="margin-top: 12px">Add to wardrobe</button>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="aReview" aria-live="polite">
+    <ol class="steps" aria-label="Progress" id="steps">
+      <li id="s1">Photo uploaded</li>
+      <li id="s2">Background removed</li>
+      <li id="s3">Tagged by AI</li>
+      <li id="s4">Your check</li>
+    </ol>
+    <div class="photo-board" id="board" style="flex-direction: column; gap: 12px">
+      <p class="muted" style="margin: 0">Your new item shows up here.</p>
+    </div>
+    <h2 class="mid" id="aReview">Does this look right?</h2>
+    <ul class="tag-chips" id="chips"></ul>
+    <div id="status"></div>
+    <div style="display: flex; flex-wrap: wrap; gap: 10px" id="actions" hidden>
+      <a class="btn" href="wardrobe.html" id="doneLink">See my wardrobe</a>
+      <a class="btn btn-ghost" id="fixLink" href="#">Fix the tags</a>
+    </div>
+  </section>
+</main>
+
+<script src="common.js?v=31"></script>
+<script>
+// Add: POST /items uploads the photo; tagging runs in the background on the server,
+// so we check GET /items/{id} every 2 seconds until the tagged item appears.
+const drop = document.getElementById("drop");
+const input = document.getElementById("photo");
+const board = document.getElementById("board");
+const chips = document.getElementById("chips");
+const status = document.getElementById("status");
+const actions = document.getElementById("actions");
+
+function step(n, state) {  // state: "", "now" or "done"
+  const li = document.getElementById(`s${n}`);
+  li.className = state;
+  li.textContent = li.textContent.replace(/^✓ /, "");
+  if (state === "done") li.textContent = "✓ " + li.textContent;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitForTags(itemId) {
+  for (let i = 0; i < 450; i++) {         // up to ~15 minutes: a big batch is processed one photo at a time
+    await sleep(2000);
+    try { return await api(`/items/${itemId}`); }
+    catch (err) { if (err.status !== 404) throw err; }  // 404 = still tagging
+  }
+  throw new Error("This is taking longer than expected");
+}
+
+const queueBox = document.getElementById("queueBox");
+const queueList = document.getElementById("queue");
+const queueTitle = document.getElementById("queueTitle");
+const addBtn = document.getElementById("addBtn");
+let rows = [];           // every row in the list: {file, li, img, nameInput, state, tools, link, remove, status, itemId}
+let working = false;     // one photo at a time, so the Mac never runs two cut-outs at once
+
+
+
+// ---- Remember the list in this browser, so it's still here after visiting another page ----
+// Only photos already sent to the server are remembered (a photo not uploaded yet can't be kept).
+const LIST_KEY = "wardrobe.addList";
+function saveList() {
+  const keep = rows.filter((r) => r.itemId && (r.status === "busy" || r.status === "review"))
+    .map((r) => ({ itemId: r.itemId, name: r.nameInput.value.trim(), originalPath: r.originalPath }));
+  try { localStorage.setItem(LIST_KEY, JSON.stringify({ day: new Date().toDateString(), items: keep })); }
+  catch (_) { /* storage blocked: the list just won't be remembered */ }
+}
+function loadSavedList() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LIST_KEY) || "null");
+    return saved && saved.day === new Date().toDateString() && Array.isArray(saved.items) ? saved.items : [];
+  } catch (_) { return []; }
+}
+
+// One row: thumbnail, a name box (you type the garment's name), status, and actions.
+// `saved` rebuilds a row remembered from earlier (no photo file, already on the server).
+function addRow(file, saved = null) {
+  const row = { file, status: saved ? "busy" : "ready", itemId: saved ? saved.itemId : null };
+  if (saved) {
+    row.originalPath = saved.originalPath;
+    row.originalUrl = imageUrl({ image_path: saved.originalPath });   // the original photo on the server
+  } else {
+    row.originalUrl = URL.createObjectURL(file);   // kept so you can compare before/after
+  }
+  row.img = el("img", { src: row.originalUrl, alt: "" });
+  row.nameInput = el("input", { class: "name-field", type: "text", maxlength: "60",
+    placeholder: "Name it, e.g. black pleated skirt", "aria-label": `Name for ${file ? file.name : "this item"}` });
+  if (saved) row.nameInput.value = saved.name || "";
+  row.nameInput.addEventListener("keydown", (e) => {   // Enter: on to the next empty name box
+    if (e.key !== "Enter") return;
+    const next = rows.find((r) => r !== row && r.status === "ready" && !r.nameInput.value.trim());
+    if (next) next.nameInput.focus();
+    else if (rows.some((r) => r.status === "ready")) addBtn.click();   // all named: upload
+    else row.nameInput.blur();
+  });
+  row.nameInput.addEventListener("input", saveList);
+  row.state = el("span", { class: "muted", style: "font-size: 14px" }, file ? file.name : "Checking…");
+  row.link = el("a", { href: "#", hidden: true }, "Fix the tags");
+  row.remove = el("button", { type: "button", class: "link-btn" }, "Remove");
+  row.remove.addEventListener("click", () => removeRow(row));
+  row.tools = el("span", { class: "row-tools" }, row.link, row.remove);
+  row.li = el("li", {}, row.img,
+    el("span", { style: "display: flex; flex-direction: column; gap: 2px; min-width: 0" },
+      row.nameInput, row.state),
+    row.tools);
+  // A finished row opens on the big board (click or Enter); its buttons/links keep their own jobs.
+  row.li.addEventListener("click", (e) => {
+    if (row.status === "review" && !e.target.closest("a, button, input")) viewRow(row);
+  });
+  row.li.addEventListener("keydown", (e) => {
+    if (row.status === "review" && e.key === "Enter" && e.target === row.li) viewRow(row);
+  });
+  queueList.append(row.li);
+  rows.push(row);
+  return row;
+}
+
+// Row statuses: ready (picked) -> waiting -> busy (cut-out + tags) -> review (check it) -> added.
+// The name box stays editable the whole time; names are saved when you press Add to wardrobe.
+const confirmBtn = document.getElementById("confirmBtn");
+function updateList() {
+  const count = (st) => rows.filter((r) => r.status === st).length;
+  const ready = count("ready"), review = count("review"), working = count("waiting") + count("busy");
+  const queued = rows.length - ready;
+  queueBox.hidden = !rows.length;
+  addBtn.hidden = !ready;
+  addBtn.textContent = ready === 1 ? "Upload" : `Upload ${ready} photos`;
+  confirmBtn.hidden = !review || working > 0 || ready > 0;   // add once everything has been checked
+  confirmBtn.textContent = review === 1 ? "Add to wardrobe" : `Add ${review} to wardrobe`;
+  queueTitle.textContent = working ? `Working on it: ${queued - working} of ${queued} done`
+    : ready && !queued ? (ready === 1 ? "Name your item" : "Name your items")
+    : review ? (review === 1 ? "Check it, then add it" : "Check them, then add them")
+    : "Couldn't add these";
+}
+
+function forget(row) {
+  row.li.remove();
+  rows = rows.filter((r) => r !== row);
+  updateList();
+  saveList();
+}
+
+// Remove: drop a photo from the list. A checked upload is thrown away on the server too;
+// it was never in your wardrobe, so there's nothing to confirm.
+async function removeRow(row) {
+  if (["ready", "waiting", "failed"].includes(row.status)) { forget(row); return; }
+  if (row.status !== "review") return;        // busy: can't stop it mid-way
+  try {
+    await api(`/items/${row.itemId}`, { method: "DELETE" });
+    forget(row);
+    if (lastShown === row.itemId) clearBoard("Removed. It wasn't added to your wardrobe.");
+  } catch (err) {
+    showMessage(status, `Couldn't remove it: ${err.message}`, "error");
+  }
+}
+
+function clearBoard(text) {
+  board.className = "photo-board";
+  board.replaceChildren(el("p", { class: "muted", style: "margin: 0" }, text));
+  chips.replaceChildren(); actions.hidden = true; status.replaceChildren();
+  [1, 2, 3, 4].forEach((n) => step(n, ""));
+  lastShown = null;
+}
+let lastShown = null;
+
+// Show one finished item on the big board with its tags.
+function showItem(item, cutOut, row) {
+  board.className = `photo-board ${categoryClass(item)}`;
+  const pic = el("img", { src: imageUrl(item), alt: `${itemName(item)}, background removed` });
+  const full = el("a", { href: imageUrl(item), target: "_blank", rel: "noopener" }, "Open full size");
+  const showVersion = (which) => {
+    const url = which === "cut" ? imageUrl(item) : row.originalUrl;
+    pic.src = url; full.href = url;
+    pic.alt = which === "cut" ? `${itemName(item)}, background removed` : `${itemName(item)}, original photo`;
+    cutChip.setAttribute("aria-pressed", String(which === "cut"));
+    origChip.setAttribute("aria-pressed", String(which !== "cut"));
+  };
+  const cutChip = el("button", { type: "button", class: "chip", "aria-pressed": "true", onclick: () => showVersion("cut") },
+                     cutOut ? "Cut-out" : "Saved photo");
+  const origChip = el("button", { type: "button", class: "chip", "aria-pressed": "false", onclick: () => showVersion("orig") }, "Original");
+  board.replaceChildren(
+    el("div", { class: "board-tools" }, cutChip, origChip),
+    pic,
+    el("div", { class: "board-link" }, full));
+  rows.forEach((r) => r.li.classList.toggle("viewing", r === row));
+  chips.replaceChildren(...[
+    ["Name", (row && row.nameInput.value.trim()) || itemName(item)], ["Category", item.category], ["Type", item.subcategory],
+    ["Colour", item.color], ["Colours", (item.colors || []).join(", ")], ["Pattern", item.pattern],
+    ["Formality", item.formality], ["Sleeve", item.sleeve], ["Shade", item.shade],
+  ].filter(([, v]) => v).map(([k, v]) => el("li", {}, el("span", { class: "muted" }, k + " "), el("strong", {}, v))));
+  const missing = ["category", "color", "pattern"].some((t) => !item[t]);
+  showMessage(status, (missing ? "Some tags are missing. Use Fix the tags to fill them in. "
+                               : cutOut ? "Check the cut-out and tags. " : "The cut-out didn't work this time, so it kept its background. ")
+                     + "It goes into your wardrobe when you press Add to wardrobe.", missing ? "error" : "");
+  document.getElementById("fixLink").href = `item.html?id=${item.id}`;
+  document.getElementById("doneLink").hidden = true;
+  actions.hidden = false;
+  lastShown = item.id;
+  return missing;
+}
+
+// Send one photo to the server straight away. From then on it's safe: leaving the page
+// doesn't lose it, and the server works through the photos one at a time.
+async function uploadOne(row) {
+  row.status = "busy";
+  row.li.className = "now";
+  row.remove.hidden = true;            // can't stop a photo mid-way; Remove comes back when it's ready
+  row.state.textContent = "Uploading…";
+  if (!rows.some((r) => r.status === "review")) {   // nothing to look at yet: show the photo
+    board.className = "photo-board";
+    board.replaceChildren(el("img", { src: row.img.src, alt: "" }));
+  }
+  try {
+    const form = new FormData();
+    form.append("file", row.file);
+    const { item_id } = await api("/items", { method: "POST", body: form });
+    row.itemId = item_id;
+    row.originalPath = `uploads/${item_id}_${row.file.name}`;   // where the server keeps the original photo
+    saveList();
+    row.state.textContent = "Removing background and tagging…";
+    return true;
+  } catch (err) {
+    failRow(row, err);
+    return false;
+  }
+}
+
+// Wait for the server to finish one photo, then show it.
+async function finishOne(row) {
+  try {
+    const item = await waitForTags(row.itemId);
+    if (!rows.some((r) => r.status === "review")) {   // first one ready: show it on the board
+      document.getElementById("s2").textContent = String(item.image_path || "").endsWith("_cutout.png")
+        ? "Background removed" : "Background kept";
+      [1, 2, 3].forEach((n) => step(n, "done")); step(4, "now");
+      document.getElementById("fixLink").hidden = false;
+      finishRow(row, item, true);
+    } else {
+      finishRow(row, item, false);
+    }
+  } catch (err) {
+    failRow(row, err);
+  }
+  updateList();
+}
+
+function failRow(row, err) {
+  row.state.textContent = `Didn't work: ${err.message}`;
+  row.status = "failed";
+  row.li.className = "problem";
+  row.remove.hidden = false;
+  showMessage(status, `Couldn't add ${row.nameInput.value.trim() || row.file.name}: ${err.message}. Check the server is running, then try again.`, "error");
+  saveList();
+  updateList();
+}
+
+// Fill in a row once its item is saved: tags, cut-out picture, category colour.
+function finishRow(row, item, show) {
+  const cutOut = String(item.image_path || "").endsWith("_cutout.png");
+  row.item = item; row.cutOut = cutOut;
+  const missing = ["category", "color", "pattern"].some((t) => !item[t]);
+  if (show) showItem(item, cutOut, row);
+  row.img.src = thumbUrl(item);
+  row.state.textContent = `${tagLine(item) || "No tags yet"}${cutOut ? "" : " · background kept"}${missing ? " · tags missing" : ""}`;
+  row.link.href = `item.html?id=${item.id}`;
+  row.link.hidden = false;
+  row.status = "review";
+  row.li.className = missing ? "problem" : `done ${categoryClass(item)}`;   // same colour as its category
+  if (show) row.li.classList.add("viewing");
+  row.li.tabIndex = 0;
+  row.li.title = "Show this item";
+  row.remove.hidden = false;
+  saveList();
+}
+
+// Upload: send every picked photo (quick), then wait for each one to be processed.
+async function work() {
+  if (working) return;
+  working = true;
+  let next;
+  const sent = [];
+  step(1, "now"); step(2, ""); step(3, "");
+  while ((next = rows.find((r) => r.status === "waiting"))) {
+    if (await uploadOne(next)) sent.push(next);
+    updateList();
+  }
+  working = false;
+  if (!sent.length) return;
+  step(1, "done"); step(2, "now"); step(3, "now");
+  showMessage(status, "Uploaded. Removing backgrounds and tagging, several photos at once.");
+  await Promise.all(sent.map(finishOne));
+  const review = rows.filter((r) => r.status === "review").length;
+  if (review > 1 && !rows.some((r) => ["waiting", "busy"].includes(r.status)))
+    showMessage(status, `All ${review} are ready. Name them, click each one to check its cut-out and tags, remove any you don't want, then press Add ${review} to wardrobe.`);
+}
+
+addBtn.addEventListener("click", () => {
+  rows.filter((r) => r.status === "ready").forEach((r) => { r.status = "waiting"; r.state.textContent = "Waiting"; });
+  updateList();
+  work();
+});
+
+// Add to wardrobe: only now do the checked items go into your wardrobe (and the outfits).
+confirmBtn.addEventListener("click", async () => {
+  const toAdd = rows.filter((r) => r.status === "review");
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = "Adding…";
+  let added = 0;
+  const failed = [];
+  for (const row of toAdd) {
+    try {
+      await api(`/items/${row.itemId}/confirm`, { method: "POST", headers: { "Content-Type": "application/json" },
+                                                  body: JSON.stringify({ name: row.nameInput.value.trim() }) });
+      added++;
+      forget(row);
+    } catch (err) { failed.push(row.nameInput.value.trim() || "an item"); }
+  }
+  confirmBtn.disabled = false;
+  updateList();
+  clearBoard(added ? `Added ${added} item${added === 1 ? "" : "s"} to your wardrobe.` : "Nothing was added.");
+  if (added) { document.getElementById("doneLink").hidden = false; document.getElementById("fixLink").hidden = true; actions.hidden = false; }
+  if (failed.length) showMessage(status, `Couldn't add ${failed.join(", ")}. Check the server is running, then press Add again.`, "error");
+  else if (added) showMessage(status, `Added ${added === 1 ? "it" : "them"}. They'll show up in your outfits from now on.`);
+});
+
+function addFiles(fileList) {
+  const files = [...(fileList || [])];
+  const images = files.filter((f) => f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name));
+  if (!images.length) { showMessage(status, "That isn't an image. Pick JPG, PNG or HEIC photos.", "error"); return; }
+  const added = images.map((f) => addRow(f));
+  updateList();
+  added[0].nameInput.focus();
+  showMessage(status, images.length < files.length
+    ? `Skipped ${files.length - images.length} file(s) that aren't photos. Name the rest, then press Upload.`
+    : `Give ${images.length === 1 ? "it" : "each one"} a name (or leave it blank to use the file name), then press Upload.`,
+    images.length < files.length ? "error" : "");
+}
+
+// Click a finished row: show it on the big board with its tags.
+function viewRow(row) {
+  document.getElementById("fixLink").hidden = false;
+  showItem(row.item, row.cutOut, row);
+  document.getElementById("s2").textContent = row.cutOut ? "Background removed" : "Background kept";
+  [1, 2, 3].forEach((n) => step(n, "done"));
+  step(4, "now");
+}
+
+// ---- Take a photo: the computer's camera in the page; phones open their camera app ----
+const camera = document.getElementById("camera");
+const video = document.getElementById("video");
+const cameraInput = document.getElementById("cameraInput");
+let stream = null;
+
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) { cameraInput.click(); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 } }, audio: false });
+    video.srcObject = stream;
+    camera.hidden = false;
+    document.getElementById("cameraBtn").hidden = true;
+  } catch (err) {
+    if (err.name === "NotAllowedError")
+      showMessage(status, "The camera is blocked. Allow it with the camera icon in the address bar, then try again.", "error");
+    else cameraInput.click();     // no camera found: fall back to the phone/file picker
+  }
+}
+
+function closeCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+  video.srcObject = null;
+  camera.hidden = true;
+  document.getElementById("cameraBtn").hidden = false;
+}
+
+function snap() {
+  if (!video.videoWidth) return;   // camera still starting
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  canvas.toBlob((blob) => {
+    const stamp = new Date().toTimeString().slice(0, 8).replace(/:/g, "");
+    addFiles([new File([blob], `photo_${stamp}.jpg`, { type: "image/jpeg" })]);
+  }, "image/jpeg", 0.92);
+}
+
+document.getElementById("cameraBtn").addEventListener("click", openCamera);
+document.getElementById("snapBtn").addEventListener("click", snap);
+document.getElementById("closeCamBtn").addEventListener("click", closeCamera);
+cameraInput.addEventListener("change", () => { addFiles(cameraInput.files); cameraInput.value = ""; });
+window.addEventListener("pagehide", closeCamera);
+
+input.addEventListener("change", () => { addFiles(input.files); input.value = ""; });
+
+// Bring back the list from earlier today: refresh each item from the server (tags may have
+// been fixed since); items still being tagged keep being checked; removed ones are dropped.
+async function restoreList() {
+  const saved = loadSavedList();
+  if (!saved.length) return;
+  const restored = saved.map((s) => addRow(null, s));
+  updateList();
+  await Promise.all(restored.map(async (row) => {
+    try {
+      let item;
+      try { item = await api(`/items/${row.itemId}`); }
+      catch (err) {
+        if (err.status !== 404) throw err;
+        row.state.textContent = "Removing background and tagging…";
+        row.li.className = "now";
+        row.remove.hidden = true;
+        item = await waitForTags(row.itemId);   // still being worked on (or removed: gives up after a while)
+      }
+      if (!item.pending) { forget(row); return; }   // already added to the wardrobe
+      finishRow(row, item, false);
+    } catch (err) {
+      if (err.status === 404 || /longer than expected/.test(err.message)) { forget(row); return; }
+      row.status = "failed";
+      row.li.className = "problem";
+      row.remove.hidden = false;
+      row.state.textContent = `Couldn't load: ${err.message}`;
+    }
+    updateList();
+  }));
+  const last = [...rows].reverse().find((r) => r.status === "review");
+  if (last && !lastShown) viewRow(last);
+}
+
+restoreList();
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files); });
+</script>
+</body>
+</html>

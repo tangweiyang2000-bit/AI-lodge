@@ -1,8 +1,12 @@
 .env
 .venv/
 uploads/
+thumbs/
 __pycache__/
 local_generate/bin/
 birefnet_generate/bin/
 macos_generate/bin/
+outfits.html
+_to_delete/
+model_runs.csv
 .DS_Store
