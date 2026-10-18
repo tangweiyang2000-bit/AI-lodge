@@ -180,8 +180,8 @@ vote (1 / -1), reason, request, title, voted_at, last_shown.
 | `outfits.html` | Preview of the last outfits, rewritten on every request (git-ignored). |
 | `test_images/` | Raw source photos. |
 
-This folder is a git worktree of the `AI wardobe-data-prep-v1` repository, branch
-`data-prep-v2`.
+Git: one branch only, `main`, pushed to GitHub (`tangweiyang2000-bit/AI-lodge`).
+Commit straight to `main`; no other branches or worktrees.
 
 ## Commands
 
