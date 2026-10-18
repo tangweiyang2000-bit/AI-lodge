@@ -11,3 +11,4 @@ _to_delete/
 model_runs.csv
 .DS_Store
 .vscode/
+birefnet_generate/

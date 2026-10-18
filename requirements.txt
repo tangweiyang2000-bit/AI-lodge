@@ -24,6 +24,3 @@ pillow==12.3.0
 numpy==2.5.3
 torch==2.14.1
 transformers==5.18.0
-
-# Only for birefnet_generate/ (Linux background removal, not used by default):
-# rembg==2.0.85

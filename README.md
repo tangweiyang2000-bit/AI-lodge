@@ -29,7 +29,6 @@ from what you actually wear.
 | `web/` | The website (Today, Wardrobe, Item, Add an item, History). |
 | `sql/` | Database schema (`schema.sql`) and one-off migrations. |
 | `macos_generate/` | Background removal on macOS, and the cut-outs of the starting wardrobe. |
-| `birefnet_generate/` | Alternative background removal that also runs on Linux (not used by default). |
 | `test_images/` | The original source photos. |
 
 ## Running it
