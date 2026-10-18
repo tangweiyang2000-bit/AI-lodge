@@ -40,12 +40,11 @@ git push -f origin old-main-backup || fail "couldn't upload the backup tag"
 
 echo "== 4. Making $MB an exact copy of data-prep-v2"
 if [ -n "$OPEN_IN" ]; then
-  cd "$OPEN_IN" || fail "can't open $OPEN_IN"
-  [ -z "$(git status --porcelain)" ] || { git status --short; fail "$OPEN_IN has unsaved changes (listed above). Old main is safe in tag old-main-backup."; }
-  git reset -q --hard data-prep-v2 || fail "reset failed (old main is safe in tag old-main-backup)"
-else
-  git branch -f "$MB" data-prep-v2 || fail "couldn't move $MB (old main is safe in tag old-main-backup)"
+  # main is open in an old folder: let go of it there, leaving that folder's files exactly as they are
+  echo "   letting go of $MB in $OPEN_IN (its files are not touched)"
+  git -C "$OPEN_IN" switch -q --detach || fail "couldn't free $MB in $OPEN_IN"
 fi
+git branch -f "$MB" data-prep-v2 || fail "couldn't move $MB (old main is safe in tag old-main-backup)"
 git push --force-with-lease origin "$MB" || fail "couldn't upload $MB (old main is safe in tag old-main-backup)"
 
 echo
