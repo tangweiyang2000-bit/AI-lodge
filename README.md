@@ -28,8 +28,8 @@ from what you actually wear.
 | `smoke_test.py` | End-to-end check against a running server. |
 | `web/` | The website (Today, Wardrobe, Item, Add an item, History). |
 | `sql/` | Database schema (`schema.sql`) and one-off migrations. |
-| `macos_generate/` | Background removal on macOS, and the cut-outs of the starting wardrobe. |
-| `test_images/` | The original source photos. |
+| `macos_generate/` | Background removal on macOS, plus the cut-outs made from the sample photos. |
+| `test_images/` | Sample photos: the 60 test items used to build and try the app. |
 
 ## Running it
 
