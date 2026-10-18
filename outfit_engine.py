@@ -1063,7 +1063,7 @@ async def require_password(request: Request, call_next):
                 given = ""
         if not secrets.compare_digest(given.encode(), APP_PASSWORD.encode()):
             return Response("Password needed", status_code=401,
-                            headers={"WWW-Authenticate": 'Basic realm="Wardrobe"'})
+                            headers={"WWW-Authenticate": 'Basic realm="Vesti"'})
     return await call_next(request)
 
 

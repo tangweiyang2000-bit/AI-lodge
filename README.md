@@ -1,4 +1,6 @@
-# Wardrobe AI Outfit Recommender
+# Vesti
+
+**An AI outfit recommender for your own wardrobe.**
 
 A personal wardrobe app. Photograph each clothing item once: the app cuts out the
 background, tags the item automatically (category, colour, pattern, formality…), then
